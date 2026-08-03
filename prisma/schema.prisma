@@ -1,0 +1,367 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  fullName     String
+  username     String   @unique
+  passwordHash String
+  role         String   @default("VET") // ADMIN, VET, RECEPTIONIST, ACCOUNTANT
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  refreshTokens  RefreshToken[]
+  visits         Visit[]
+  vaccinations   Vaccination[]
+  createdInvoices Invoice[]      @relation("CreatedInvoices")
+  payments       Payment[]       @relation("CreatedPayments")
+  stockMovements StockMovement[]
+  auditLogs      AuditLog[]
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tokenHash String
+  userId    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Owner {
+  id         String   @id @default(uuid())
+  fullName   String
+  phone      String   @unique
+  altPhone   String?
+  email      String?
+  address    String?
+  nationalId String?
+  notes      String?
+  balance    Decimal  @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  pets     Pet[]
+  invoices Invoice[]
+  payments Payment[]
+
+  @@index([phone])
+}
+
+model Breed {
+  id      String @id @default(uuid())
+  species String // CAT, DOG
+  nameAr  String
+  nameEn  String
+
+  pets Pet[]
+
+  @@unique([species, nameAr])
+}
+
+model Pet {
+  id              String    @id @default(uuid())
+  ownerId         String
+  name            String
+  species         String    // CAT, DOG strictly
+  breedId         String?
+  sex             String    // MALE, FEMALE
+  birthDate       DateTime
+  color           String?
+  weight          Decimal?
+  microchip       String?   @unique
+  isNeutered      Boolean   @default(false)
+  bloodType       String?
+  allergies       String?
+  chronicDiseases String?
+  diet            String?
+  photoUrl        String?
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  owner        Owner         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  breed        Breed?        @relation(fields: [breedId], references: [id])
+  appointments Appointment[]
+  visits       Visit[]
+  vaccinations Vaccination[]
+  labTests     LabTest[]
+  surgeries    Surgery[]
+  boardings    Boarding[]
+  invoices     Invoice[]
+
+  @@index([ownerId])
+  @@index([species])
+}
+
+model Appointment {
+  id          String   @id @default(uuid())
+  petId       String
+  vetId       String?
+  startsAt    DateTime
+  durationMin Int      @default(30)
+  type        String   @default("EXAM") // EXAM, VACCINE, SURGERY, FOLLOWUP, EMERGENCY, LAB, DENTAL, GROOMING
+  status      String   @default("SCHEDULED") // SCHEDULED, CONFIRMED, ARRIVED, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  pet   Pet    @relation(fields: [petId], references: [id], onDelete: Cascade)
+  visit Visit?
+
+  @@index([startsAt])
+  @@index([petId])
+}
+
+model Visit {
+  id             String    @id @default(uuid())
+  petId          String
+  vetId          String
+  appointmentId  String?   @unique
+  chiefComplaint String
+  history        String?
+  temperature    Decimal?
+  weight         Decimal?
+  heartRate      Int?
+  respRate       Int?
+  crt            String?
+  physicalExam   String?
+  diagnosis      String
+  plan           String
+  followUpAt     DateTime?
+  status         String    @default("OPEN") // OPEN, COMPLETED
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  pet           Pet            @relation(fields: [petId], references: [id], onDelete: Cascade)
+  vet           User           @relation(fields: [vetId], references: [id])
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id])
+  prescriptions Prescription[]
+  labTests      LabTest[]
+  surgeries     Surgery[]
+
+  @@index([petId])
+  @@index([vetId])
+}
+
+model Prescription {
+  id           String   @id @default(uuid())
+  visitId      String
+  medicine     String
+  dosage       String
+  frequency    String
+  durationDays Int
+  instructions String?
+  createdAt    DateTime @default(now())
+
+  visit Visit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+}
+
+model Vaccine {
+  id           String   @id @default(uuid())
+  name         String
+  species      String   // CAT, DOG strictly
+  manufacturer String?
+  batchNo      String
+  expiryDate   DateTime
+  stockQty     Int      @default(0)
+  price        Decimal  @default(0)
+  createdAt    DateTime @default(now())
+
+  vaccinations Vaccination[]
+}
+
+model Vaccination {
+  id            String    @id @default(uuid())
+  petId         String
+  vaccineId     String
+  givenByVetId  String
+  givenAt       DateTime  @default(now())
+  nextDueAt     DateTime?
+  doseNumber    Int       @default(1)
+  certificateNo String?
+  createdAt     DateTime  @default(now())
+
+  pet      Pet     @relation(fields: [petId], references: [id], onDelete: Cascade)
+  vaccine  Vaccine @relation(fields: [vaccineId], references: [id])
+  givenBy  User    @relation(fields: [givenByVetId], references: [id])
+
+  @@index([petId])
+}
+
+model LabTest {
+  id             String   @id @default(uuid())
+  petId          String
+  visitId        String?
+  testName       String
+  sampleType     String?
+  result         String?
+  referenceRange String?
+  status         String   @default("REQUESTED") // REQUESTED, PENDING, COMPLETED, CANCELLED
+  fileUrl        String?
+  createdAt      DateTime @default(now())
+
+  pet   Pet    @relation(fields: [petId], references: [id], onDelete: Cascade)
+  visit Visit? @relation(fields: [visitId], references: [id])
+}
+
+model Surgery {
+  id            String   @id @default(uuid())
+  petId         String
+  visitId       String?
+  procedureName String
+  anesthesia    String?
+  team          String?
+  postOpNotes   String?
+  status        String   @default("SCHEDULED")
+  createdAt     DateTime @default(now())
+
+  pet   Pet    @relation(fields: [petId], references: [id], onDelete: Cascade)
+  visit Visit? @relation(fields: [visitId], references: [id])
+}
+
+model Boarding {
+  id         String    @id @default(uuid())
+  petId      String
+  cageNo     String
+  checkIn    DateTime  @default(now())
+  checkOut   DateTime?
+  dailyRate  Decimal   @default(0)
+  dailyNotes String?
+  status     String    @default("ACTIVE")
+  createdAt  DateTime  @default(now())
+
+  pet Pet @relation(fields: [petId], references: [id], onDelete: Cascade)
+}
+
+model Supplier {
+  id            String   @id @default(uuid())
+  name          String
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  products Product[]
+}
+
+model Product {
+  id           String    @id @default(uuid())
+  sku          String    @unique
+  name         String
+  category     String    @default("MEDICINE") // MEDICINE, VACCINE, CONSUMABLE, FOOD, ACCESSORY, SERVICE
+  unit         String    @default("piece")
+  costPrice    Decimal   @default(0)
+  sellPrice    Decimal   @default(0)
+  stockQty     Int       @default(0)
+  reorderLevel Int       @default(5)
+  expiryDate   DateTime?
+  supplierId   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  supplier       Supplier?       @relation(fields: [supplierId], references: [id])
+  stockMovements StockMovement[]
+  invoiceItems   InvoiceItem[]
+}
+
+model StockMovement {
+  id        String   @id @default(uuid())
+  productId String
+  userId    String
+  type      String   // IN, OUT, ADJUST
+  quantity  Int
+  reason    String?
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+model Invoice {
+  id          String   @id @default(uuid())
+  invoiceNo   String   @unique
+  ownerId     String
+  petId       String?
+  subtotal    Decimal  @default(0)
+  discount    Decimal  @default(0)
+  tax         Decimal  @default(0)
+  total       Decimal  @default(0)
+  paid        Decimal  @default(0)
+  status      String   @default("UNPAID") // UNPAID, PARTIAL, PAID, CANCELLED
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner     Owner         @relation(fields: [ownerId], references: [id])
+  pet       Pet?          @relation(fields: [petId], references: [id])
+  createdBy User          @relation("CreatedInvoices", fields: [createdById], references: [id])
+  items     InvoiceItem[]
+  payments  Payment[]
+
+  @@index([status])
+  @@index([ownerId])
+}
+
+model InvoiceItem {
+  id          String  @id @default(uuid())
+  invoiceId   String
+  productId   String?
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @default(0)
+  total       Decimal @default(0)
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+}
+
+model Payment {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  ownerId     String
+  amount      Decimal  @default(0)
+  method      String   @default("CASH") // CASH, CARD, BANK_TRANSFER
+  notes       String?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  owner     Owner   @relation(fields: [ownerId], references: [id])
+  createdBy User    @relation("CreatedPayments", fields: [createdById], references: [id])
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  type       String
+  title      String
+  message    String
+  targetDate DateTime
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String?
+  action      String
+  entity      String
+  entityId    String?
+  beforeValue String?
+  afterValue  String?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+}
