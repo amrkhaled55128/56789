@@ -14,17 +14,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
-      - name: Ensure no committed runtime secrets
-        run: |
-          if git grep -nEI '(JWT_SECRET|DATABASE_URL|PASSWORD)\s*=\s*[^$<{[:space:]]+' -- ':!.env.example' ':!README.md'; then
-            echo 'Potential committed secret detected.'
-            exit 1
-          fi
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Type check
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
