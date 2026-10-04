@@ -1,0 +1,81 @@
+// ⚙️ الإعدادات الرئيسية للبوت — كل التعديلات هنا
+// ☁️ على السحابة (Railway) بيقرا من متغيرات البيئة، والقيم دي احتياطية
+
+const env = (k, fallback) => process.env[k] ?? fallback;
+
+// تحويل رقم مصري (01xxxxxxxxx) → JID واتساب دولي
+export function toJid(phone) {
+  const digits = String(phone).replace(/\D/g, '');
+  const intl = digits.startsWith('20') ? digits : '20' + digits.replace(/^0/, '');
+  return `${intl}@s.whatsapp.net`;
+}
+
+export const config = {
+  botName: env('BOT_NAME', 'ASTRO BOT'),
+  botEmoji: '⚡',
+
+  // البادئة اللي بتقفل الأوامر
+  prefix: env('BOT_PREFIX', '.'),
+
+  // 👑 أرقام المالكين (بالصيغة الدولية بدون + أو مسافات) — مفصولة بفواصل في متغير البيئة
+  owners: env('OWNERS', '201273990719')
+    ? env('OWNERS', '201273990719').split(',').map((x) => x.replace(/\D/g, '')).filter(Boolean)
+    : [],
+
+  // 📲 لو عايز تربط الجهاز بكود بدل QR اكتب رقمك هنا
+  pairingPhone: env('PAIRING_PHONE', ''),
+
+  // 🌐 منفذ صفحة الـ QR/الداشبورد
+  // Railway بيبعت PORT في صيغة tcp://0.0.0.0:8080 — لازم نطلّع الرقم منّها
+  qrServerPort: Number(String(env('PORT', '')).split(':').pop()) || Number(env('DASH_PORT', 3000)) || 3000,
+
+  // 🔐 كلمة سر للداشبورد لو اتنشرت على النت
+  dashToken: env('DASH_TOKEN', ''),
+
+  // 🚫 هل البوت يرد على رسائله هو نفسه؟
+  respondToSelf: false,
+
+  // 🧠 الرد الذكي التلقائي
+  aiChat: env('AI_CHAT', 'true') === 'true',
+
+  // ⏱️ كولداون بين كل أمر لكل مستخدم (بالملي ثانية)
+  cooldown: 2000,
+
+  // ☁️ سيرفر الـ API
+  apiBaseUrl: env('API_BASE_URL', 'https://engez.a7a.online'),
+
+  // ⚡ Groq — العقل السريع (qwen3.8-27b) + السمع (whisper)
+  groqApiKey: env('GROQ_API_KEY', ''),
+  groqModel: env('GROQ_MODEL', 'qwen/qwen3.8-27b'),
+  sttModel: env('STT_MODEL', 'whisper-large-v3'),
+
+  // 🎙️ الصوت الافتراضي: غوكو (كرتوني) — فارس (12) احتياط
+  ttsVoice: env('TTS_VOICE', 'goku'),
+};
+
+// 💚 الأصدقاء المقربين — لكل واحد أسلوب خاص مع استرو
+// 🆔 القاعدة: قيد أساسي واحد = رقم دولي واحد لكل شخص (عشان الذاكرة ماتتكررش أبداً)
+// صيغ الـ LID بتتحط في `lids` جنب الشخص كـ metadata — core/identity.js هي اللي بتستخدمها
+// عشان يحوّل أي صيغة هوية (LID/رقم) للمفتاح الأساسي الواحد بتاع صاحبنا
+export const CONTACTS = {
+  // أدهم — صاحبك، كلامه عادي
+  '201273990719@s.whatsapp.net': {
+    name: 'أدهم',
+    role: 'صاحب',
+    style: 'صاحبيك في المقهى — بتتكلم معاه عادي كده، خفيف دم وhelpful. اناديه "أدهم" أو "يا معلم".',
+    lids: ['263488291246130@lid'], // 🆔 صيغ LID المعروفة لنفس الشخص
+  },
+  // شروق — حبيبته: استرو بيحبها ويواسيها وبيحميها
+  '201002135088@s.whatsapp.net': {
+    name: 'شروق',
+    role: 'حبيبة',
+    style: `💗 دي أخص صاحباتك — بتناديها بحب وبتنصحها وهي زعلانة. ردك عليها:
+- دايماً حنون وطماع فيها ("يا قلبي"، "قمر"، "ملكي")
+- لو زعلانة: واسيها وطمأنيها قبل أي كلام تاني
+- لو محتاجة نصيحة: انصحيها بصراحة ومن غير ما تعلّمي
+- لو هي خفيفة: اهزر معاها وضحك
+- ما تحكيهاش حاجة وجعتها مرة تانية ولا تحكم عليها
+- خلي كلامك قصير ومقنع`,
+    lids: ['40171382817021@lid'], // 🆔 صيغ LID المعروفة لنفس الشخص
+  },
+};

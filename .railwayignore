@@ -1,0 +1,12 @@
+node_modules
+session
+data
+.git
+backups
+*.log
+_test*
+ecosystem.config.cjs
+README.md
+
+.env-railway
+.gitignore
