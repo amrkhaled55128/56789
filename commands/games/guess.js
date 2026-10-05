@@ -104,7 +104,7 @@ export default {
       const coins = grantWin(sk, 15);
       return sendQuickReplies(sock, m.jid, {
         title: `🎉 برافو! الرقم هو *${game.number}*`,
-        text: `خمنته و*fاضل ${game.left} محاولة* بس! 🔥\n💰 +${coins} عملة\n📊 انتصاراتك: ${me.win} • خساراتك: ${me.lose}`,
+        text: `خمنته و*فاضل ${game.left} محاولة* بس! 🔥\n💰 +${coins} عملة\n📊 انتصاراتك: ${me.win} • خساراتك: ${me.lose}`,
         buttons: [{ label: '🔄 العب تاني', id: '.guess' }],
       });
     }

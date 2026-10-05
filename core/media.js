@@ -36,16 +36,45 @@ export async function voiceBuffer(m) {
   }
 }
 
-// ⬆️ رفع buffer لاستضافة مؤقتة → رابط (للـ API اللي بتاخد روابط)
+// ⬆️ رفع buffer لاستضافة مؤقتة مع خوادم احتياطية متعددة (Uguu -> Catbox -> Tmpfiles)
 export async function uploadBuffer(buffer, fileName = 'media.jpg', mimeType = 'image/jpeg') {
+  // 1) خادم Uguu
   try {
     const form = new FormData();
     form.append('files[]', new Blob([buffer], { type: mimeType }), fileName);
-    const { data } = await axios.post('https://uguu.se/upload?output=json', form, { timeout: 60000 });
-    return data?.url ?? data?.files?.[0]?.url ?? null;
-  } catch {
-    return null;
+    const { data } = await axios.post('https://uguu.se/upload?output=json', form, { timeout: 25000 });
+    const url = data?.url ?? data?.files?.[0]?.url;
+    if (url) return url;
+  } catch (err) {
+    console.warn('⚠️ رفع Uguu تعذر، المحاولة مع الخادم الاحتياطي Catbox');
   }
+
+  // 2) خادم Catbox الاحتياطي
+  try {
+    const form = new FormData();
+    form.append('reqtype', 'fileupload');
+    form.append('fileToUpload', new Blob([buffer], { type: mimeType }), fileName);
+    const { data } = await axios.post('https://catbox.moe/user/api.php', form, { timeout: 25000 });
+    if (typeof data === 'string' && data.startsWith('http')) return data.trim();
+  } catch (err) {
+    console.warn('⚠️ رفع Catbox تعذر، المحاولة مع Tmpfiles');
+  }
+
+  // 3) خادم Tmpfiles الاحتياطي
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([buffer], { type: mimeType }), fileName);
+    const { data } = await axios.post('https://tmpfiles.org/api/v1/upload', form, { timeout: 25000 });
+    const rawUrl = data?.data?.url;
+    if (rawUrl) {
+      // tmpfiles direct download link: insert /dl/ after domain
+      return rawUrl.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    }
+  } catch (err) {
+    console.error('❌ فشل رفع الملف على جميع خوادم الاستضافة:', err.message?.slice(0, 80));
+  }
+
+  return null;
 }
 
 // 🎙️ رسالة صوتية → رابط مؤقت (للشظام وفصل الصوت)

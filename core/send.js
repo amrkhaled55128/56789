@@ -8,56 +8,92 @@ import { fetchMedia, toOggOpus, toMp4, toJpeg } from './fetchmedia.js';
 // - الأنواع التانية (روابط/نسخ/مكالمات) لحد 3 لكل رسالة
 // - الأنواع ممنوع تختلط مع بعض في رسالة واحدة — العميل بيرفض الرسالة كلها
 // - قوائم single_select بتظهر على أندرويد بس، وباقي الأجهزة بتحوّلها نص
+//
+// عقد الـ helpers هنا: ولا دالة بترمي استثناء خام للمستدعي — أي فشل بيتسجّل
+// في اللوج وبيترجّع fallback نصي بسيط. المنشن بيمرّ زي ما هو في extra
+// (mentions) — واتساب بيفهم LID ورقم على السواء.
 
 function defaultFooter() {
   return `${config.botName} ${config.botEmoji}`;
 }
 
-// 🛡️ سقف حجم الوسائط — من غير حد، رابط وحش بيطلع OOM على Railway
-const MAX_DOWNLOAD = 64 * 1024 * 1024; // 64MB
+// 🔁 إعادة محاولة الأخطاء العابرة — ومضة شبكة واحدة ما تضيعش رد المستخدم.
+// الأخطاء الدايمة (وسائط مرفوضة/رابط بايظ) بترجع فورًا من غير تأخير.
+const TRANSIENT_RE = /timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|socket hang up|connection closed|stream errored|precondition failed|rate-?over-?limit|too many requests|service unavailable|bad gateway|gateway time-?out|429|502|503|504/i;
 
-// إرسال نص عادي
+function isTransient(err) {
+  const code = err?.output?.statusCode ?? err?.status;
+  if (code === 429 || code === 502 || code === 503 || code === 504) return true;
+  return TRANSIENT_RE.test(String(err?.message ?? err ?? ''));
+}
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function withRetry(label, fn, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i === attempts - 1 || !isTransient(err)) break;
+      const delay = 700 * 2 ** i; // 700ms → 1.4s → 2.8s
+      console.warn(`⏳ ${label} فشل (${String(err?.message ?? err).slice(0, 50)}) — إعادة محاولة ${i + 2}/${attempts} بعد ${delay}ms`);
+      await wait(delay);
+    }
+  }
+  throw lastErr;
+}
+
+// 🛡️ سقف حجم الوسائط (64MB) موجود في fetchmedia.js — هنا بنستلم Buffer جاهز
+
+// إرسال نص عادي — بإعادة محاولة للأخطاء العابرة
 export async function sendText(sock, jid, text, extra = {}) {
-  return sock.sendMessage(jid, { text, ...extra });
+  return withRetry('إرسال نص', () => sock.sendMessage(jid, { text, ...extra }));
 }
 
 // ─────────────────────────────────────────────────────────────
 // 📥 إرسال الوسائط
 //
 // ⚠️ كان كله بيعمل `{ url }` وبيسلّم الرابط لواتساب يشيله بنفسه. ده بيفشل
-// في حالات كتير: لينك بيتحوّل Redirect، سيرفر بيطلب.headers، أو نتيجة
+// في حالات كتير: لينك بيتحوّل Redirect، سيرفر بيطلب headers، أو نتيجة
 // الـAPI بترجّع صفحة HTML مش ملف. وWhatsApp بيطلّع رسالة "media upload
 // failed" من غير سبب مفهوم.
 //
-// دلوقتي: بننزّل إحنا (معUser-Agent + تحويلات + meta-refresh)، نتأكد إن
+// دلوقتي: بننزّل إحنا (مع User-Agent + تحويلات + meta-refresh)، نتأكد إن
 // اللي نزل media فعلاً، نحوّله للصيغة اللي واتساب عايزها، وبعدين نبعت
 // Buffer — فمفيش اعتماد على إن واتساب يقدر يوصل.
 // ─────────────────────────────────────────────────────────────
 
 // 🎙️ رسالة صوتية (voice note) — لازم OGG/Opus وإلا مش بيشتغل
 export async function sendVoice(sock, jid, audioUrl, extra = {}) {
-  bump('voices');
   try {
     const { buffer } = await fetchMedia(audioUrl, { expect: 'audio' });
     const ogg = await toOggOpus(buffer);
-    return await sock.sendMessage(jid, {
-      audio: ogg,
-      mimetype: 'audio/ogg; codecs=opus',
-      ptt: true,
-      ...extra,
-    });
+    const res = await withRetry('الإرسال الصوتي', () =>
+      sock.sendMessage(jid, {
+        audio: ogg,
+        mimetype: 'audio/ogg; codecs=opus',
+        ptt: true,
+        ...extra,
+      }));
+    bump('voices'); // نعدّ الناجح بس — المحاولات الفاشلة مش صوت اتبعت
+    return res;
   } catch (err) {
     console.error('⚠️ فشل الإرسال الصوتي:', err.message?.slice(0, 70));
     // احتياطي: ابعت الملف زي ما هو كـ audio عادي (مش voice note)
     try {
       const { buffer, type } = await fetchMedia(audioUrl, {});
-      return await sock.sendMessage(jid, {
-        audio: buffer,
-        mimetype: type,
-        ...extra,
-      });
+      const res = await withRetry('الإرسال الصوتي الاحتياطي', () =>
+        sock.sendMessage(jid, {
+          audio: buffer,
+          mimetype: type,
+          ...extra,
+        }));
+      bump('voices');
+      return res;
     } catch {
-      return m_reply(sock, jid, '🎙️ مقدرتش أبعت الصوت ده — اللينك مش صالح');
+      return fallbackText(sock, jid, '🎙️ مقدرتش أبعت الصوت ده — اللينك مش صالح');
     }
   }
 }
@@ -66,14 +102,15 @@ export async function sendVoice(sock, jid, audioUrl, extra = {}) {
 export async function sendAudio(sock, jid, audioUrl, extra = {}) {
   try {
     const { buffer, type } = await fetchMedia(audioUrl, { expect: 'audio' });
-    return await sock.sendMessage(jid, {
-      audio: buffer,
-      mimetype: /mp3|mpeg/i.test(type) ? 'audio/mpeg' : type,
-      ...extra,
-    });
+    return await withRetry('إرسال الأغنية', () =>
+      sock.sendMessage(jid, {
+        audio: buffer,
+        mimetype: /mp3|mpeg/i.test(type) ? 'audio/mpeg' : type,
+        ...extra,
+      }));
   } catch (err) {
     console.error('⚠️ فشل الإرسال الصوتي:', err.message?.slice(0, 70));
-    return m_reply(sock, jid, '🎵 مقدرتش أحمّل الصوت ده — جرّب تاني');
+    return fallbackText(sock, jid, '🎵 مقدرتش أحمّل الصوت ده — جرّب تاني');
   }
 }
 
@@ -81,21 +118,23 @@ export async function sendAudio(sock, jid, audioUrl, extra = {}) {
 export async function sendImage(sock, jid, imageUrl, caption, extra = {}) {
   try {
     const { buffer, type } = await fetchMedia(imageUrl, { expect: 'image' });
-    return await sock.sendMessage(jid, {
-      image: buffer,
-      mimetype: /jpe?g/i.test(type) ? 'image/jpeg' : type,
-      caption,
-      ...extra,
-    });
+    return await withRetry('إرسال الصورة', () =>
+      sock.sendMessage(jid, {
+        image: buffer,
+        mimetype: /jpe?g/i.test(type) ? 'image/jpeg' : type,
+        caption,
+        ...extra,
+      }));
   } catch (err) {
     console.error('⚠️ فشل الإرسال:', err.message?.slice(0, 70));
     // لو الصورة WebP واتساب مش بيقبلها — حوّلها JPEG
     try {
       const { buffer } = await fetchMedia(imageUrl, {});
       const jpg = await toJpeg(buffer);
-      return await sock.sendMessage(jid, { image: jpg, mimetype: 'image/jpeg', caption, ...extra });
+      return await withRetry('إرسال الصورة المحوّلة', () =>
+        sock.sendMessage(jid, { image: jpg, mimetype: 'image/jpeg', caption, ...extra }));
     } catch {
-      return m_reply(sock, jid, '🖼️ مقدرتش أبعت الصورة دي');
+      return fallbackText(sock, jid, '🖼️ مقدرتش أبعت الصورة دي');
     }
   }
 }
@@ -105,14 +144,16 @@ export async function sendVideo(sock, jid, videoUrl, caption, extra = {}) {
   try {
     const { buffer, type } = await fetchMedia(videoUrl, { expect: 'video' });
     if (/mp4/i.test(type)) {
-      return await sock.sendMessage(jid, { video: buffer, mimetype: 'video/mp4', caption, ...extra });
+      return await withRetry('إرسال الفيديو', () =>
+        sock.sendMessage(jid, { video: buffer, mimetype: 'video/mp4', caption, ...extra }));
     }
     // webm/mkv — حوّله
     const mp4 = await toMp4(buffer, { height: 720 });
-    return await sock.sendMessage(jid, { video: mp4, mimetype: 'video/mp4', caption, ...extra });
+    return await withRetry('إرسال الفيديو المحوّل', () =>
+      sock.sendMessage(jid, { video: mp4, mimetype: 'video/mp4', caption, ...extra }));
   } catch (err) {
     console.error('⚠️ فشل الفيديو:', err.message?.slice(0, 70));
-    return m_reply(sock, jid, '🎬 مقدرتش أبعت الفيديو — جرّب تاني');
+    return fallbackText(sock, jid, '🎬 مقدرتش أبعت الفيديو — جرّب تاني');
   }
 }
 
@@ -121,21 +162,23 @@ export async function sendGif(sock, jid, gifUrl, caption, extra = {}) {
   try {
     const { buffer, type } = await fetchMedia(gifUrl, { expect: 'video' });
     const mp4 = /mp4/i.test(type) ? buffer : await toMp4(buffer, { height: 480 });
-    return await sock.sendMessage(jid, {
-      video: mp4,
-      mimetype: 'video/mp4',
-      gifPlayback: true,
-      caption,
-      ...extra,
-    });
+    return await withRetry('إرسال الـGIF', () =>
+      sock.sendMessage(jid, {
+        video: mp4,
+        mimetype: 'video/mp4',
+        gifPlayback: true,
+        caption,
+        ...extra,
+      }));
   } catch (err) {
     console.error('⚠️ فشل الـGIF:', err.message?.slice(0, 70));
-    return m_reply(sock, jid, '🌀 مقدرتش أبعت الـGIF');
+    return fallbackText(sock, jid, '🌀 مقدرتش أبعت الـGIF');
   }
 }
 
-// 🧹 رسالة خطأ قصيرة من غير ما نكسر المسار
-function m_reply(sock, jid, text) {
+// 🧹 رسالة خطأ قصيرة من غير ما نكسر المسار — وبتعدّ فشل الإرسال للإحصائيات
+function fallbackText(sock, jid, text) {
+  bump('sendFailures');
   return sock.sendMessage(jid, { text }).catch(() => {});
 }
 
@@ -164,7 +207,7 @@ export async function sendQuickReplies(sock, jid, {
 
   // مفيش أزرار ولا قوائم → نص عادي (أرخص وأضمن من كارت فاضي)
   if (!list.length && !sections?.length) {
-    return sock.sendMessage(jid, { text: String(text ?? ''), ...extra });
+    return withRetry('إرسال نص', () => sock.sendMessage(jid, { text: String(text ?? ''), ...extra }));
   }
 
   try {
@@ -177,7 +220,7 @@ export async function sendQuickReplies(sock, jid, {
       b.addSelection(selectTitle);
       for (const s of sections) {
         b.makeSection(s.title ?? '');
-        for (const r of s.rows) b.makeRow(r.header ?? '', r.title, r.description ?? '', r.id);
+        for (const r of s.rows ?? []) b.makeRow(r.header ?? '', r.title, r.description ?? '', r.id);
       }
     }
 
@@ -191,60 +234,101 @@ export async function sendQuickReplies(sock, jid, {
       }
     }
 
-    return await b.send(jid);
+    return await withRetry('إرسال الأزرار', () => b.send(jid));
   } catch (err) {
     console.error('⚠️ الأزرار فشلت، هرجّع نص:', err.message?.slice(0, 80));
     let fallback = title ? `╭─「 ${title} 」\n\n` : '';
     fallback += String(text ?? '');
-    for (const btn of list) fallback += `\n▸ ${btn.id.replace('copy:', '')}`;
+    for (const btn of list) fallback += `\n▸ ${String(btn.id ?? '').replace('copy:', '')}`;
     for (const s of sections ?? []) {
       fallback += `\n\n◆ ${s.title ?? ''}`;
-      for (const r of s.rows) fallback += `\n  • ${r.id}`;
+      for (const r of s.rows ?? []) fallback += `\n  • ${r.id ?? r.title ?? ''}`;
     }
     fallback += '\n╰───────────';
-    return sock.sendMessage(jid, { text: fallback, ...extra });
+    return withRetry('إرسال النص الاحتياطي', () => sock.sendMessage(jid, { text: fallback, ...extra }));
   }
 }
 
-// رسالة تفاعلية (نفس sendQuickReplies —kept للتوافق مع الأوامر القديمة)
+// رسالة تفاعلية (نفس sendQuickReplies — kept للتوافق مع الأوامر القديمة)
 export async function sendInteractive(sock, jid, opts) {
   return sendQuickReplies(sock, jid, opts);
 }
 
+// نص احتياطي للكاروسيل/الريتش/البول — بيعرض نفس المحتوى شكل بسيط
+function plainFallback(sock, jid, extra, ...parts) {
+  const text = parts.filter((p) => p && String(p).trim()).join('\n');
+  bump('sendFailures');
+  return sock.sendMessage(jid, { text: text || '…', ...extra }).catch((err) => {
+    console.error('⚠️ حتى الـ fallback النصي فشل:', err.message?.slice(0, 60));
+  });
+}
+
 // 🎠 كاروسيل: كروت بتتقلب — كل كارو لازم يكون فيه صورة أو فيديو
 export async function sendCarousel(sock, jid, { body, footer, cards = [] }) {
-  const built = [];
-  for (const c of cards) {
-    const b = new MB.Button(sock)
-      .setImage(c.image)
-      .setBody(c.body ?? '')
-      .setFooter(footer ?? defaultFooter());
-    for (const btn of (c.buttons ?? []).slice(0, 3)) {
-      if (btn.url) b.addUrl(btn.label, btn.url);
-      else b.addReply(btn.label, btn.id);
+  const extra = {}; // الكاروسيل مبياخدش mentions مباشرة — كفاية إننا منكسرش
+  try {
+    const built = [];
+    for (const c of cards) {
+      const b = new MB.Button(sock)
+        .setImage(c.image)
+        .setBody(c.body ?? '')
+        .setFooter(footer ?? defaultFooter());
+      for (const btn of (c.buttons ?? []).slice(0, 3)) {
+        if (btn.url) b.addUrl(btn.label, btn.url);
+        else b.addReply(btn.label, btn.id);
+      }
+      built.push(await b.toCard());
     }
-    built.push(await b.toCard());
+    const carousel = new MB.Carousel(sock)
+      .setBody(body)
+      .setFooter(footer ?? defaultFooter())
+      .addCard(built);
+    return await carousel.send(jid);
+  } catch (err) {
+    // ⚠️ كان بيرمي الاستثناء خام — الأمر اللي ناداه كان بيقع كله.
+    // دلوقتي: بنعرض الكروت كنص بسيط.
+    console.error('⚠️ الكاروسيل فشل، هرجّع نص:', err.message?.slice(0, 80));
+    const lines = [String(body ?? '')];
+    for (const c of cards) {
+      lines.push(`◆ ${c.body ?? ''}`);
+      for (const btn of (c.buttons ?? []).slice(0, 3)) {
+        lines.push(`  ▸ ${btn.url ?? String(btn.id ?? '').replace('copy:', '')}`);
+      }
+    }
+    return plainFallback(sock, jid, extra, ...lines);
   }
-  const carousel = new MB.Carousel(sock)
-    .setBody(body)
-    .setFooter(footer ?? defaultFooter())
-    .addCard(built);
-  await carousel.send(jid);
 }
 
 // 📊 استطلاع رأي (Poll)
 export async function sendPoll(sock, jid, { name, values, selectableCount = 1 }) {
-  return sock.sendMessage(jid, { poll: { name, values, selectableCount } });
+  try {
+    return await sock.sendMessage(jid, { poll: { name, values, selectableCount } });
+  } catch (err) {
+    console.error('⚠️ الاستطلاع فشل، هرجّع نص:', err.message?.slice(0, 80));
+    const lines = [`📊 *${name}*`, '', ...values.map((v) => `▫️ ${v}`), '', 'اكتب اختيارك كرد 😄'];
+    return plainFallback(sock, jid, {}, ...lines);
+  }
 }
 
 // 🤖 كارت غني بشكل Meta AI — نص + كود + جدول + اقتراحات
 export async function sendRich(sock, jid, { title, footer, text, code, table, suggestions }) {
-  const rich = new MB.AIRich(sock);
-  if (title) rich.setTitle(title);
-  if (footer) rich.setFooter(footer);
-  if (text) rich.addText(text);
-  if (code) rich.addCode(code.language ?? 'javascript', code.value ?? code);
-  if (table) rich.addTable(table);
-  if (suggestions) rich.addSuggest(suggestions);
-  await rich.send(jid);
+  try {
+    const rich = new MB.AIRich(sock);
+    if (title) rich.setTitle(title);
+    if (footer) rich.setFooter(footer);
+    if (text) rich.addText(text);
+    if (code) rich.addCode(code.language ?? 'javascript', code.value ?? code);
+    if (table) rich.addTable(table);
+    if (suggestions) rich.addSuggest(suggestions);
+    return await rich.send(jid);
+  } catch (err) {
+    console.error('⚠️ الكارت الغني فشل، هرجّع نص:', err.message?.slice(0, 80));
+    const parts = [title ? `*${title}*` : '', String(text ?? '')];
+    if (code) parts.push(`\`\`\`\n${code.value ?? code}\n\`\`\``);
+    if (table?.length) {
+      for (const row of table) parts.push(Array.isArray(row) ? row.join(' | ') : String(row));
+    }
+    if (suggestions?.length) parts.push('اقتراحات: ' + suggestions.join(' • '));
+    return plainFallback(sock, jid, {}, ...parts);
+  }
 }

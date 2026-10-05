@@ -3,13 +3,6 @@
 
 const env = (k, fallback) => process.env[k] ?? fallback;
 
-// تحويل رقم مصري (01xxxxxxxxx) → JID واتساب دولي
-export function toJid(phone) {
-  const digits = String(phone).replace(/\D/g, '');
-  const intl = digits.startsWith('20') ? digits : '20' + digits.replace(/^0/, '');
-  return `${intl}@s.whatsapp.net`;
-}
-
 export const config = {
   botName: env('BOT_NAME', 'ASTRO BOT'),
   botEmoji: '⚡',

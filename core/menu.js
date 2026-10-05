@@ -8,16 +8,16 @@ import { config } from '../config.js';
 // كل قسم هنا لازم يكون ليه فولدر مقابل في commands/.
 export const SECTIONS = [
   { id: 'ai', label: 'الذكاء', emoji: '🤖', desc: 'اسأل، صور، فيديو، وصف أي صورة' },
-  { id: 'games', label: 'الألعاب', emoji: '🎮', desc: 'كل أنواع الترفيه' },
-  { id: 'economy', label: 'الاقتصاد', emoji: '💰', desc: 'كارتك، بنك، متجر، تحويل' },
-  { id: 'download', label: 'التحميل', emoji: '📥', desc: 'أغاني، فيديوهات، سوشيال' },
-  { id: 'tools', label: 'الأدوات', emoji: '🛠️', desc: 'ترجمة، صور، ملصق، تذكيرات' },
-  { id: 'protection', label: 'الحماية', emoji: '🚫', desc: 'حظر، كتم، إنذار، بلاك ليست' },
-  { id: 'group', label: 'الجروبات', emoji: '🛡️', desc: 'إعدادات وإدارة' },
-  { id: 'music', label: 'المانجا', emoji: '📚', desc: 'مانجا، روايات، شازم' },
-  { id: 'fun', label: 'الفلتة', emoji: '🚬', desc: 'الهكزة والفلتة الكويسة' },
-  { id: 'general', label: 'عام', emoji: '📌', desc: 'القائمة، كارت، تعليمات' },
-  { id: 'owner', label: 'المالك', emoji: '👑', desc: 'أوامر المالك' },
+  { id: 'games', label: 'الألعاب', emoji: '🎮', desc: 'تحديات، كويز، إكس أو، مسابقات' },
+  { id: 'economy', label: 'الاقتصاد', emoji: '💰', desc: 'رصيدك، بنك، متجر، تحويل' },
+  { id: 'download', label: 'التحميل', emoji: '📥', desc: 'يوتيوب، فيسبوك، تيك توك، أغاني' },
+  { id: 'tools', label: 'الأدوات', emoji: '🛠️', desc: 'ترجمة، ملصقات، تذكيرات، فحص' },
+  { id: 'protection', label: 'الحماية', emoji: '🚫', desc: 'حظر، كتم، إنذارات، بلاك ليست' },
+  { id: 'group', label: 'الجروبات', emoji: '🛡️', desc: 'إعدادات وإدارة المجموعات' },
+  { id: 'music', label: 'الموسيقى والمحتوى', emoji: '🎧', desc: 'شازام، مانجا، روايات، عزل صوت' },
+  { id: 'fun', label: 'فرفشة وهزار', emoji: '😂', desc: 'نكت مصرية، الشيشة، مزاج رايق' },
+  { id: 'general', label: 'عام', emoji: '📌', desc: 'القائمة، كارت، تعليمات، حالة البوت' },
+  { id: 'owner', label: 'المالك', emoji: '👑', desc: 'أوامر وإحصائيات المالك' },
 ];
 
 // أوامر محتاجة نص — بتعرض الصيغة + زر نسخ بدل ما تفشل

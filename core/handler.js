@@ -4,11 +4,15 @@ import { maybeAutoReply } from './autoreply.js';
 import { checkMessage, getSettings } from './protection.js';
 import { db } from './db.js';
 import { isOwner } from '../lib/utils.js';
+import { normalizeArabic } from './arabic.js';
 import { resolveKey, canonicalKey } from './identity.js';
 import { awardXp, checkBadges } from './economy.js';
 import { bump, recordCommandError } from './stats.js';
 
 const cooldowns = new Map();
+// 🗣️ آخر مرة قلنالها "استنى" — عشان الرد يبقى مرة في البرست مش مع كل رسالة
+const cooldownNotices = new Map();
+const COOLDOWN_NOTICE_GAP = 10000;
 const botStartTime = Date.now();
 
 // 🧹 الكولداون كان بيكبر بلا حد: مفتاح لكل (مستخدم × أمر) = 63 أمر × كل حد
@@ -22,6 +26,9 @@ export function startCooldownSweep() {
     const now = Date.now();
     for (const [k, t] of cooldowns) {
       if (now - t > COOLDOWN_TTL) cooldowns.delete(k);
+    }
+    for (const [k, t] of cooldownNotices) {
+      if (now - t > COOLDOWN_TTL) cooldownNotices.delete(k);
     }
   }, 600000);
   cooldownSweep.unref?.();
@@ -53,6 +60,8 @@ function extractBody(message) {
   if (message.extendedTextMessage?.text) return message.extendedTextMessage.text;
   if (message.imageMessage?.caption) return message.imageMessage.caption;
   if (message.videoMessage?.caption) return message.videoMessage.caption;
+  // ملف/caption — الأوامر المتبعتة كوصف لملف كانت بتضيع
+  if (message.documentMessage?.caption) return message.documentMessage.caption;
 
   // رد على زر سريع أو اختيار من القائمة (native flow)
   const params = message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
@@ -73,6 +82,11 @@ function extractBody(message) {
   );
 }
 
+/**
+ * نقطة دخول كل رسايل واتساب — بتفك الرسالة، تبني الـ context، توجّه الأوامر
+ * للرد الذكي التلقائي. كل رسالة في try بتاعها عشان وحدة وقعة ما تقتلش الباقي.
+ * ما بترميش استثناءات لأي حد فوقها.
+ */
 export async function handleUpsert(sock, ctx, { messages, type }) {
   if (type !== 'notify') return;
 
@@ -80,7 +94,7 @@ export async function handleUpsert(sock, ctx, { messages, type }) {
   // بره الـ try → unhandled rejection بيقتل المعالج كله
   for (const msg of messages ?? []) {
     try {
-      if (!msg?.message) continue;
+      if (!msg?.message || !msg.key) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
       if (msg.key.fromMe && !config.respondToSelf) continue;
 
@@ -111,8 +125,16 @@ export async function handleUpsert(sock, ctx, { messages, type }) {
       // 😴 لو البوت مقفول في الشات ده (عدا المالك)
       if (db.get('botOff', {})[m.jid] && !isOwner(m, config)) continue;
 
-      // 🛡️ حماية الجروبات — لو الرسالة اتحذفت متعالجهاش
-      if (m.isGroup && (await checkMessage(sock, m))) continue;
+      // 🛡️ حماية الجروبات — لو الرسالة اتحذفت متعالجهاش.
+      // fail-open: نظام الحماية لو ضرب error (حذف فاشل، API واقف) ما يوقفش
+      // الرسالة كلها — كانت الأوامر كلها في الجروب بتضيع بصمت مع أول عطل.
+      if (m.isGroup) {
+        try {
+          if (await checkMessage(sock, m)) continue;
+        } catch (err) {
+          console.error('⚠️ فحص حماية الجروب فشل — الرسالة هتعدي عادي:', err.message?.slice(0, 80));
+        }
+      }
 
       await routeCommand(sock, m, ctx);
       // 🧠 الرد الذكي التلقائي — للأوامر اللي مش بأوامر (خاص / منشن / رد / كلمة سحرية)
@@ -193,20 +215,41 @@ async function routeCommand(sock, m, ctx) {
   const name = m.command;
   if (!name) return;
 
-  const cmd = ctx.commands.get(name);
+  // 🔤 بحث مُطبَّع: الـ loader بيسجّل نسخة مُطبَّعة من كل اسم عربي (بيرجع للـ
+  // normalizeArabic)، لكن toLowerCase لوحده مش بيشيل الهمزة/التطويل/الة —
+  // يعني ".الأغاني" كانت بتفشل رغم إن "الاغاني" مسجّلة. بنجرّب المفتاح
+  // زي ما اتبعت الأول (سلوك قديم محفوظ) وبعدين الصيغة المُطبَّعة كاحتياط.
+  const cmd = ctx.commands.get(name) ?? ctx.commands.get(normalizeArabic(name));
+  // 🔑 الكولداون بالمفتاح الكانوني — كان بـ m.sender، فنفس الشخص بصيغة LID
+  // ورقم تليفون كان بيعدي الكولداون مرتين.
+  const identity = m.identityKey ?? m.sender;
+  const now = Date.now();
+
   if (!cmd) {
-    // 🤔 اقتراح أقرب أمر لو كتب غلط
-    const suggestion = suggestCommand(name, [...new Set(ctx.commands.keys())]);
-    if (suggestion) {
-      await m.reply(`🤔 مفيش أمر \`${config.prefix}${name}\` — قصدتك \`${config.prefix}${suggestion}\`؟`);
+    // 🤔 اقتراح أقرب أمر لو كتب غلط — بس للكلام المفهوم: أقل من 3 حروف
+    // اقتراحها هيطلع عشوائي ويزعّج (مثلاً ".ها" بتقترح أي حاجة قريبة).
+    // ولها كولداون برضه عشان الاسم الغلط ميترجعش اقتراح مع كل سبام.
+    if (now - (cooldowns.get(`${identity}:__suggestion__`) ?? 0) >= config.cooldown) {
+      cooldowns.set(`${identity}:__suggestion__`, now);
+      const suggestion = name.length >= 3 ? suggestCommand(name, [...new Set(ctx.commands.keys())]) : null;
+      if (suggestion) {
+        await m.reply(`🤔 مفيش أمر \`${config.prefix}${name}\` — قصدتك \`${config.prefix}${suggestion}\`؟`);
+      }
     }
     return;
   }
 
-  // كولداون بسيط لكل مستخدم ضد السبام
-  const key = `${m.sender}:${cmd.name}`;
-  const now = Date.now();
-  if (now - (cooldowns.get(key) ?? 0) < config.cooldown) return;
+  // ⏱️ كولداون لكل مستخدم ضد السبام — المالك معفى، واللي في الكولداون
+  // بنقول له صراحة بدل الصمت اللي بيخليه يفتكر البوت بوظ.
+  // والأمر نفسه يقدر يظبط كولداون أطول بـ `cooldown` (بالملي ثانية) —
+  // مفيد لأوامر الذكاء والتوليد الغالية. اللي مش محدده بياخد العام.
+  const cooldownMs = Math.max(0, Number(cmd.cooldown) || config.cooldown);
+  const key = `${identity}:${cmd.name}`;
+  const left = cooldownMs - (now - (cooldowns.get(key) ?? 0));
+  if (left > 0) {
+    if (!isOwner(m, config)) notifyCooldown(m, identity, Math.ceil(left / 1000));
+    return;
+  }
   cooldowns.set(key, now);
 
   try {
@@ -214,14 +257,46 @@ async function routeCommand(sock, m, ctx) {
       ...ctx,
       startTime: botStartTime,
     });
-    // ⚡ خبرة + 📊 عداد الداشبورد
+  } catch (err) {
+    // ❌ معالجة أخطاء مركزية: اللوج الكامل (بالـ stack) في الكونسول، وللمستخدم
+    // رسالة عربية لطيفة من غير تسريب تفاصيل تقنية.
+    console.error(`❌ خطأ في الأمر ${cmd.name} (${m.pushName}):`, err);
+    recordCommandError(cmd.name);
+    await m.reply(friendlyError(err)).catch(() => {});
+    return;
+  }
+  // ⚡ خبرة + 📊 عداد الداشبورد — برّة try الأمر عشان فشل الاقتصاد/الإحصاء
+  // ميتحسبش غلط إن الأمر فشل (كان بيوصل للمستخدم "حصل خطأ" بعد ما نجح).
+  try {
     bump('commands', `${config.prefix}${cmd.name} — ${m.pushName}`);
     await grantReward(sock, m, cmd);
   } catch (err) {
-    console.error(`❌ خطأ في الأمر ${cmd.name}:`, err);
-    recordCommandError(cmd.name);
-    await m.reply(`⚠️ حصل خطأ أثناء تنفيذ الأمر:\n${err?.message ?? err}`).catch(() => {});
+    console.error(`⚠️ فشل منح مكافأة ${cmd.name} (${m.pushName}):`, err.message ?? err);
   }
+}
+
+// ⏳ رد الكولداون — مرة واحدة كل 10 ثواني للشخص الواحد مهما سبّم أوامر،
+// عشان نوضح من غير ما نغرق الشات برسايل.
+function notifyCooldown(m, identity, secondsLeft) {
+  const now = Date.now();
+  if (now - (cooldownNotices.get(identity) ?? 0) < COOLDOWN_NOTICE_GAP) return;
+  cooldownNotices.set(identity, now);
+  m.reply(`⏳ اهدى شوية يا ${m.pushName} 😄 — استنى *${secondsLeft} ثانية* بين كل أمر والأمر`).catch(() => {});
+}
+
+// رسالة الخطأ اللي بتوصل للمستخدم: لو الخطأ رسالة عربية قصيرة متعمدة من
+// الأمر نفسه ("مفيش رابط فيديو") بنعرضها زي ما هي، ولو تقني بنخفيه.
+function friendlyError(err) {
+  const raw = String(err?.message ?? err ?? '').trim();
+  const intentional =
+    raw &&
+    raw.length <= 80 &&
+    !raw.includes('\n') &&
+    /[\u0600-\u06FF]/.test(raw) &&
+    !/Error|at\s|code:|ENOENT|ECONN|timeout|JSON|fetch|http|\d{3}/i.test(raw);
+  return intentional
+    ? `⚠️ ${raw}`
+    : '⚠️ حصل خطأ غير متوقع عندنا وإحنا بنصلحه — جرّب تاني بعد شوية 🙏';
 }
 
 // ⚡ قيمة الخبرة لكل أمر — مش كلها 2 زي الأول.
@@ -253,12 +328,7 @@ async function grantReward(sock, m, cmd) {
   bits.push(`⚡ شغال: ${xp} XP`);
   for (const b of badges) bits.push(`${b.emoji} وسام جديد: *${b.label}*`);
 
-  await sock
-    .sendMessage(m.jid, {
-      text: bits.join('\n'),
-      mentions: [m.sender],
-    })
-    .catch(() => {});
+  await sendText(sock, m.jid, bits.join('\n'), { mentions: [m.sender] }).catch(() => {});
 }
 
 // أقرب اسم أمر — مسافة تعديل بسيطة (حروف ناقصة/زيادة/مختلفة)

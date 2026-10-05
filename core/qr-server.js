@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import QRCode from 'qrcode';
 import qrcodeTerminal from 'qrcode-terminal';
 import { join, dirname } from 'node:path';
@@ -9,8 +10,9 @@ import { db } from './db.js';
 import { config } from '../config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// ☁️ على Railway ملف الـ QR جوّه الـ volume
-const QR_FILE = join(
+// ☁️ على Railway ملف الـ QR جوّه الـ volume — ومُصدَّر عشان connection.js
+// تكتب فيه على نفس المسار بالظبط (كان محسوب مرتين في ملفين لوحدهم)
+export const QR_FILE = join(
   __dirname,
   '..',
   process.env.RAILWAY_ENVIRONMENT ? 'session' : 'data',
@@ -71,6 +73,9 @@ const PAGE = `<!DOCTYPE html>
 <small style="display:block;text-align:center;margin-top:16px">البيانات بتتجدد تلقائيًا كل 5 ثواني • الصفحة دي محلية على جهازك بس</small>
 <script>
 const TOKEN = new URLSearchParams(location.search).get('token') ?? '';
+// 🔒 escape HTML — الأسماء والجروبات جايين من واتساب (أي حد يقدر يسمّي نفسه
+// "<img onerror=...>") فمنحقنهمش خام في innerHTML
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const fmtUptime = (ms) => { const s = Math.floor(ms/1000); const h = Math.floor(s/3600), m = Math.floor(s%3600/60); return h ? h + ' ساعة ' + m + ' دقيقة' : m + ' دقيقة ' + (s%60) + ' ثانية'; };
 async function tick() {
   try {
@@ -90,15 +95,15 @@ async function tick() {
     ].map(([l, n]) => '<div class="card"><div class="num">' + n + '</div><div class="lbl">' + l + '</div></div>').join('');
 
     document.getElementById('people').innerHTML = (d.people ?? []).map(p =>
-      '<div class="row"><span>' + p.name + '</span><span>💭 ' + p.memories + ' ذكرى • قبل ' + p.ago + '</span></div>'
+      '<div class="row"><span>' + esc(p.name) + '</span><span>💭 ' + p.memories + ' ذكرى • قبل ' + p.ago + '</span></div>'
     ).join('') || '<div class="row">لسه مفيش أحد</div>';
 
     document.getElementById('groups').innerHTML = (d.groups ?? []).map(g =>
-      '<div class="row"><span>' + g.subject + '</span><span>' + g.size + ' عضو</span></div>'
+      '<div class="row"><span>' + esc(g.subject) + '</span><span>' + g.size + ' عضو</span></div>'
     ).join('') || '<div class="row">البوت مش في جروبات</div>';
 
     document.getElementById('lastcmds').innerHTML = (d.lastCommands ?? []).map(c =>
-      '<div class="row"><span>' + c + '</span></div>'
+      '<div class="row"><span>' + esc(c) + '</span></div>'
     ).join('') || '<div class="row">لسه مفيش أوامر</div>';
 
     const qrbox = document.getElementById('qrbox');
@@ -119,12 +124,22 @@ tick();
 
 // ⚠️ محليًا على 127.0.0.1 — وعلى السحابة محمي بكلمة سر (DASH_TOKEN)
 export function startQrServer(port = 3000) {
+  const isCloud = !!process.env.RAILWAY_ENVIRONMENT;
+  // 🔐 على السحابة مفيش وضع بدون حماية: لو DASH_TOKEN فاضي بنولّد توكن
+  // عشوائي ونطبعه في اللوج — السيرفر بيسمع على 0.0.0.0 وذاكرة الناس مش
+  // حاجة تتحط مفتوحة على النت.
+  let authToken = config.dashToken || '';
+  if (!authToken && isCloud) {
+    authToken = randomBytes(16).toString('hex');
+    console.log(`🔐 DASH_TOKEN مش متحدد — ولّدت توكن مؤقت للداشبورد:\n   ?token=${authToken}`);
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
-      // 🔐 حماية بالتوكن لو متفعلة (السحابة)
-      if (config.dashToken) {
+      // 🔐 حماية بالتوكن (السحابة، أو لو المالك حدد توكن محليًا)
+      if (authToken) {
         const url = new URL(req.url, 'http://x');
-        if (url.searchParams.get('token') !== config.dashToken) {
+        if (url.searchParams.get('token') !== authToken) {
           res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end('<body style="background:#0b141a;color:#e9edef;font-family:sans-serif;text-align:center;padding-top:40vh">🔐 الداشبورد محمي — ضيف <code>?token=xxxx</code></body>');
           return;
@@ -165,7 +180,10 @@ export function startQrServer(port = 3000) {
             ago: ago === null ? '—' : ago < 1 ? 'دقايق' : ago + ' ساعة',
           };
         });
-        const connected = !readQr();
+        // 🔗 حالة الاتصال الحقيقية من stats (setConnected مربوطة بـ connection.update)
+        // — ومطمنين من ملف الـ QR لو البوت لسه ماقالش حالته. قبلكان ملف QR فاضي
+        // كان معناه «متصل» حتى وهو متسجل خروج!
+        const connected = typeof snap.connected === 'boolean' ? snap.connected : !readQr();
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ ...snap, people, connected }));
         return;
@@ -181,7 +199,6 @@ export function startQrServer(port = 3000) {
     }
   });
   // ☁️ على Railway: بيسمع على كل الواجهات بالمنفذ بتاعهم
-  const isCloud = !!process.env.RAILWAY_ENVIRONMENT;
   const host = isCloud ? '0.0.0.0' : '127.0.0.1';
   server.on('error', (err) => {
     // ⚠️ من غير handler: حدث 'error' من غير مستمع بيعمل throw → index.js كان

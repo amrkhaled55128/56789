@@ -1,8 +1,15 @@
+import { parseArabicNumber } from './arabic.js';
 import { db } from './db.js';
 
 // ⏰ المجدول — تذكيرات ونشر تلقائي محفوظ في قاعدة البيانات
-// بيتنفذ من interval كل 30 ثانية — وبيكمل شغل بعد إعادة تشغيل البوت (محفوظ في db)
+// بيتنفذ من interval كل 30 ثانية (في proactive.js) — وبيكمل شغل بعد إعادة
+// تشغيل البوت لأن الوظائف محفوظة في db تحت مفتاح "scheduled" كخريطة مسطحة
+// { id → job }.
 
+/**
+ * بيضيف وظيفة مجدولة ويرجّع الـ id بتاعها.
+ * meta بتحمل تفاصيل النوع (مثلاً نص التذكير ومين طلبه).
+ */
 export function addJob(type, chatJid, at, meta = {}) {
   const all = db.get('scheduled', {});
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -21,25 +28,21 @@ export function removeJob(id) {
   return false;
 }
 
+// الوظائف اللي وقتها جه — بترجع مرجع للوظائف الحية (التعديل بيأثر على db)
 export function dueJobs(now = Date.now()) {
   return Object.values(db.get('scheduled', {})).filter((j) => j.at <= now);
 }
 
-export function countJobs(type) {
-  return Object.values(db.get('scheduled', {})).filter((j) => j.type === type).length;
-}
-
-// 📋 كل الوظائف من نوع معيّن (الأمر بيفلتر بيها اللي للمستخدم)
+// 📋 كل الوظائف، اختياريًا من نوع معيّن (الأمر بيفلتر بيها اللي للمستخدم)
 export function listJobs(type) {
   return Object.values(db.get('scheduled', {})).filter((j) => !type || j.type === type);
 }
 
 // 📅 مهام يومية — بتتنفذ مرة واحدة في اليوم (بتوقيت القاهرة)
 //
-// ⚠️ `dailyRunKey` كان بيسجّل "اتعملت" وهو مجرد فحص، فأي فشل بعده
-// (fetch الجروبات وقع، الإرسال رفض) كان بيخلي المهمة تتخطّى نهاردا كله
-// من غير إعادة محاولة. دلوقتي: `dailyRunKey` فحص بس، و`markDailyRun` التسجيل
-// بيحصل بعد ما الشغل ينجح فعلاً.
+// ⚠️ `dailyRunKey` فحص بس، و`markDailyRun` التسجيل بيحصل بعد ما الشغل ينجح
+// فعلاً — فأي فشل (fetch الجروبات وقع، الإرسال رفض) بيسيب المهمة تتكرر
+// بعد 30 ثانية بدل ما تتخطى نهاردا كله.
 export function dailyRunKey(task) {
   const runs = db.get('dailyRuns', {});
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
@@ -60,9 +63,7 @@ export function cairoWeekday() {
   return new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo', weekday: 'long' });
 }
 
-// 🗓️ مُحلل وقت مصري بسيط: "بعد 5 دقايق" / "بعد ساعتين" / "بعد يوم" / "بعد نص ساعة" / "بعد يوم" (بدون رقم = 1)
-import { parseArabicNumber } from './arabic.js';
-
+// 🗓️ مُحلل وقت مصري بسيط: "بعد 5 دقايق" / "بعد ساعتين" / "بعد يوم" / "بعد نص ساعة" (بدون رقم = 1)
 export function parseEgyptianDuration(text) {
   const t = String(text).toLowerCase().trim();
   let minutes = null;

@@ -1,7 +1,8 @@
 import api from './api.js';
 import { isOpen, noteEmpty } from './api.js';
 import { chatGroq, groqAnalyze, isGroqReady } from './groq.js';
-import { PERSONA_FULL, FEW_SHOTS_FULL, PERSONA_COMPACT, LAYERS, MODES, RELATIONSHIPS, INSULT_DEFENSE } from './persona.js';
+import { PERSONA_FULL, FEW_SHOTS_FULL, PERSONA_COMPACT, LAYERS, MODES, RELATIONSHIPS, INSULT_DEFENSE, BOT_MOODS } from './persona.js';
+import { analyzeLocally, needsAiAnalysis } from './intent.js';
 import { findContact } from './identity.js';
 import {
   getProfile,
@@ -19,7 +20,33 @@ const COMPACT_BUDGET = 1100;
 const MAX_CHARS = 280; // سقف الرد في الشات — قصير واحترافي
 
 // 🛡️ كشف الإهانة — عشان استرو يدافع عن كرامته
-const INSULT_RE = /(?:قذر|وسخ|اهبل|أهبل|غبي|جدعان ب[^ا-ي]|بتاع|خنزير|حمار|زفت|تفو|اهبل|مكواه|عبيط|تبا|تبًا|لعنة|خراب|مناويج|عير|كس ام|زبال|وسخة|حقير|تافه|بضان|اعرف نفسك|انحبس|انحبس)/i;
+// ⚠️ المقارنة بالكلمات مش بالنص كله: قبل كده كان substring — فكلمة "بتاع"
+// العادية ("بتاع ايه ده؟") و"وسخ" جوه "اتوسخ" و"خراب" جوه "خرابيط"
+// كانت بتتقابل بقهر وهي ناس بريئة. العربي مفيهوش \b فبنقسم الجملة لكلمات
+// ونطبعّها (تاء مربوطة/همزات/أداة تعريف) قبل المقارنة.
+const INSULT_WORDS = new Set([
+  'قذر', 'وسخ', 'وسخة', 'اهبل', 'غبي', 'خنزير', 'حمار', 'زفت', 'تفو',
+  'مكواه', 'عبيط', 'تبا', 'لعنة', 'خراب', 'مناويج', 'عير', 'زبال',
+  'حقير', 'تافه', 'بضان',
+]);
+const INSULT_PHRASES = [/كس\s*ام/u, /اعرف\s+نفسك/u, /انحبس/u];
+
+function normalizeWord(w) {
+  return String(w)
+    .toLowerCase()
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/[ىي]/g, 'ي')
+    .replace(/[ً-ْٰـ]/g, '')
+    .replace(/^(?:و|ف)?ال/, ''); // أداة التعريف والعطف: "الوسخ" → "وسخ"
+}
+
+// هل الرسالة فيها إهانة حقيقية؟ (كلمة كاملة = كلمة، مش جزء كلمة)
+export function isInsultText(text) {
+  const tokens = String(text).split(/[^\p{L}\p{N}]+/u).map(normalizeWord).filter(Boolean);
+  if (tokens.some((w) => INSULT_WORDS.has(w))) return true;
+  return INSULT_PHRASES.some((re) => re.test(text));
+}
 
 const MOOD_HINTS = {
   زعلان: 'هو زعلان دلوقتي — افتح معاه دفا واطمن عليه قبل أي كلام تاني.',
@@ -64,7 +91,7 @@ function buildInstruction(profile, pushName, contact, { voice, extra, mood, mode
     parts.push(RELATIONSHIPS[contact?.role] ?? RELATIONSHIPS.default);
 
     // 🛡️ الدفاع عن الكرامة — اللي يهين بيتقابل بقهر (الأصدقاء محميين)
-    if (INSULT_RE.test(text) && !contact) {
+    if (isInsultText(text) && !contact) {
       parts.push(INSULT_DEFENSE);
     }
   } else {
@@ -78,6 +105,11 @@ function buildInstruction(profile, pushName, contact, { voice, extra, mood, mode
     }
   }
 
+  // 🫂 صاحب قديم مش من قائمة الأصحاب — فاكر منه ذكريات كتير، الرحابة قبل الغرابة
+  if (!contact && profile.name && (profile.memories?.length ?? 0) >= 3) {
+    parts.push('🫂 الشخص ده صاحب قديم بتفتكر منه كلام كتير — خاطبه كصاحب مش كواحد غريب، وارجع لحاجة قالها قبل كده لو ناسبت الكلام.');
+  }
+
   // 😐 نظام الحنية — لو زهق من كتر
   if (currentTone(profile) === 'chill') {
     parts.push('مودك هادي دلوقتي: رد عادي خفيف كصاحب عادي — من غير "يا قلبي" ولا كلام حنية زيادة.');
@@ -88,11 +120,14 @@ function buildInstruction(profile, pushName, contact, { voice, extra, mood, mode
   // 🎭 أنماط الشخصية المفعّلة
   if (MODES[mode]) parts.push(MODES[mode]);
 
+  // 😌 مود استرو نفسه — بيتغير باليوم (ثابت طول النهار) عشان الشخصية تفضل حية
+  if (BOT_MOODS.length) parts.push(BOT_MOODS[Math.floor(Date.now() / 86400000) % BOT_MOODS.length]);
+
   for (const layer of pickLayers({ text, profile, analysis, mode })) parts.push(layer);
 
   // 🧠 الذاكرة (الاسم، المعلومات، الإحساس السابق، آخر 8 رسايل)
   const used = parts.join('\n').length;
-  const { block } = contextBlock(profile, pushName, Math.max(100, budget - used - 30));
+  const { block } = contextBlock(profile, pushName, Math.max(100, budget - used - 30), text);
   if (block) parts.push('معلومات عنه:\n' + block);
 
   if (voice) parts.push('ردك هيتبعت صوت — جملة واحدة بس.');
@@ -101,16 +136,14 @@ function buildInstruction(profile, pushName, contact, { voice, extra, mood, mode
   return parts.join('\n').slice(0, budget);
 }
 
-// 🚫 نصوص المزوّد اللي بترفض — بتتخطّى ومتخزّنش
+// 🚫 نصوص المزوّد اللي بترفض أو بتخترق الشخصية — بتتخطّى ومتخزّنش
 const ERROR_PATTERNS = [
   /لم أتمكن|تعذّر|تعذر|فشل|غير متاح|too many|rate limit|حاول مرة أخرى|إعادة المحاولة/i,
-  /لا أستطيع|لا يمكنني|مجرد نموذج|نموذجًا لغويًا|نموذج لغوي|بصفتي نموذج|لستُ مصمم|لست مصمم|لا أفهم ذلك/i,
-  /I cannot|I can't|I'm just|as a language model|I am unable/i,
+  /لا أستطيع|لا يمكنني|مجرد نموذج|نموذجًا لغويًا|نموذج لغوي|بصفتي نموذج|بصفتي|لستُ مصمم|لست مصمم|لست قادرا|لست مؤهلاً|لا أفهم ذلك/i,
+  /غير مبرمج|تمت برمجتي|كذكاء اصطناعي|كنموذج|كمساعد ذكي|كمساعد افتراضي|كنموذج لغوي|أنا ذكاء اصطناعي/i,
+  /I cannot|I can't|I'm just|as a language model|as an ai|I am unable|trained by openai|trained by/i,
 ];
 
-// ⚠️ كان فيه `|| t.length < 12` — وده كان يرفض أي رد عربي قصير صحيح
-// ("تمام" و"أيوه" و"يا معلم") كأنه رد مزود فاشل. الرد القصير السليم مشروع
-// في المحادثة المصرية، فلازم نرفض الفراغ بس لا القصير.
 const MIN_USEFUL = 2;
 
 export function isErrorText(text) {
@@ -119,7 +152,8 @@ export function isErrorText(text) {
   return ERROR_PATTERNS.some((re) => re.test(t));
 }
 
-// 🧠 تحليل قبل الرد
+// 🧠 تحليل قبل الرد — نفس قواعد groqAnalyze: المزاج مفرداته مقفولة على
+// المفاتيح المعروفة عشان الماب الاحتياطي والتلميحات يلاقوا الكلمة دايمًا
 async function analyzeMessage(text) {
   if (isGroqReady()) {
     const a = await groqAnalyze(text);
@@ -127,7 +161,7 @@ async function analyzeMessage(text) {
   }
   try {
     const raw = await api.gpt(
-      `حلّل الرسالة دي وأجيب بـ JSON بس: {"mood":"إحساسه","intent":"فضفضة|سؤال|مزح|دعم|غزل|نصيحة|أمر","topic":"باختصار"}\nالرسالة: ${text.slice(0, 250)}`,
+      `حلّل الرسالة دي وأجيب بـ JSON بس: {"mood":"زعلان|مبسوط|تعبان|قلقان|حبيت|عادي","intent":"فضفضة|سؤال|مزح|دعم|غزل|نصيحة|أمر","topic":"باختصار"}\nالرسالة: ${text.slice(0, 250)}`,
     );
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
     return json ? JSON.parse(json) : null;
@@ -149,7 +183,10 @@ export function polishReply(reply, { allowLong = false } = {}) {
   t = t.replace(/\s{2,}/g, ' ');
 
   // "أنا مجرد بوت" → "أنا استرو" — بدون ما ناكل باقي الجملة
-  t = t.replace(/\bأنا\s+(?:مجرد\s+|بس\s+|في\s+الأساس\s+)?(?:بوت|روبوت|ذكاء\s+اصطناعي|برنامج|كود|نظام)\b[،,]?/g, 'أنا استرو');
+  // ⚠️ \b في جافاسكربت مش بيعمل حدود جنب الحروف العربية (word chars هي
+  // [A-Za-z0-9_] بس) فالاستبدال ما كانش بيشتغل أبدًا. بنستخدم حدود
+  // يونيكود: ممنوع حرف عربي/رقم قبل "أنا" أو بعد اسم النظام.
+  t = t.replace(/(?<![\p{L}\p{N}])أنا\s+(?:مجرد\s+|بس\s+|في\s+الأساس\s+)?(?:بوت|روبوت|ذكاء\s+اصطناعي|برنامج|كود|نظام)(?![\p{L}])/gu, 'أنا استرو');
 
   t = t.replace(/\n{3,}/g, '\n\n').trim();
 
@@ -196,29 +233,23 @@ export async function chatWithAI({
   // للنص الغامض أو الطويل — قبل كده كان نداء Groq إضافي في كل رسالة.
   const local = analyzeLocally(text);
   const analysis = needsAiAnalysis(text, local) ? await analyzeMessage(text) : null;
-  // النتيجة المدمجة: المحلي أولاً (أسرع وأدق في الإحساس البسيط)
-  const merged = {
-    mood: local.mood ?? mood ?? analysis?.mood ?? null,
-    intent: local.intent ?? analysis?.intent ?? null,
-    topic: local.topic || analysis?.topic || '',
-    confidence: Math.max(local.confidence, analysis?.confidence ?? 0),
-  };
 
+  // تلميح التحليل للنموذج: من الـAI لو اشتغل، أو من التصنيف المحلي لو لقى
+  // إحساس/نية — قبل كده الرسايل الواضحة محليًا كانت توصل للنموذج من غير
+  // أي تلميح إحساس خالص (التلميح كان معلّق على وجود نداء الـAI بس).
   const analysisHint = analysis
     ? `إحساسه "${analysis.mood ?? mood ?? 'عادي'}" — عايز "${analysis.intent ?? 'كلام'}" — "${analysis.topic ?? 'عام'}".`
-    : '';
+    : local.mood || local.intent
+      ? `إحساسه "${local.mood ?? mood ?? 'عادي'}" — عايز "${local.intent ?? 'كلام'}"${local.topic ? ` — "${local.topic}"` : ''}.`
+      : '';
 
   // 🧠 تاريخ المحادثة الحقيقي — النموذج يشوف الكلام كأنه محادثة، مش سطور
   const history = (profile.lastMessages ?? []).slice(-6);
+  // بنشيل بس الرسالة الحالية نفسها (اتذكرت قبل النداء) — startsWith كانت
+  // بتشيل كلام قديم يبدأ بنفس الكلمات ("ازيك" بتقطع "ازيك يا معلم")
   const convo = history
-    .filter((h) => h.text && !h.text.startsWith(text))
+    .filter((h) => h.text && h.text.trim() !== text.trim())
     .map((h) => ({ role: h.role === 'bot' ? 'assistant' : 'user', content: String(h.text).slice(0, 300) }));
-
-  const instruction = buildInstruction(profile, pushName, contact, {
-    voice, mood, mode, analysis, text,
-    extra: [analysisHint, extra].filter(Boolean).join(' '),
-    full: isGroqReady(),
-  });
 
   const userMsg = { role: 'user', content: text.slice(0, 500) };
   // البديل بتاع منع التكرار
@@ -243,7 +274,7 @@ export async function chatWithAI({
     extra: [analysisHint, extra].filter(Boolean).join(' '),
     full: false,
   });
-  const isInsult = INSULT_RE.test(text) && !contact;
+  const isInsult = isInsultText(text) && !contact;
   const roastInstruction = `${PERSONA_COMPACT}\n\n${INSULT_DEFENSE}\n\nالمهم دلوقتي: الرسالة دي إهانة ليك — رد عليه بقهر مصري حاد وسخرية في سطر واحد من غير سباب صريح.`;
 
   // 1) GPT-5.6 Luna (engez) — أساسي إن كان endpoint متاحًا.
@@ -268,40 +299,46 @@ export async function chatWithAI({
   }
 
   // 2) ⚡ Groq qwen3.8-27b — بالشخصية الكاملة (احتياط قوي)
+  // الـ429 والtimeout لهم retry/backoff موحّد جوه groq.js نفسها —
+  // قبل كده كان الretry مكرر هنا وخد الغلبان: داخلي + خارجي = 3 نداءات
   if (isGroqReady()) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const reply = await chatGroq({
-          system: isInsult ? roastInstruction : (retryHint ? fullInstruction + retryHint : fullInstruction),
+    // 🚫 منع التكرار: نقارن بردود استرو الأخيرة فقط — الرد اللي يشبه كلام
+    // المستخدم نفسه مش تكرار. المقارنة دي كانت مقيّدة بـ variants اللي
+    // محدش بيبعته، فالمسار العادي كان يرجّع نفس الرد حرفيًا لنفس السؤال.
+    const recentBots = (profile.lastMessages ?? []).filter((h) => h.role === 'bot').slice(-3);
+    let first = null;
+    try {
+      const reply = await chatGroq({
+        system: isInsult ? roastInstruction : (retryHint ? fullInstruction + retryHint : fullInstruction),
+        messages: [...convo, userMsg],
+        maxTokens: 260,
+        temperature: variants > 0 ? 0.9 : 0.7,
+        topP: 0.8,
+      });
+      if (reply) {
+        first = polishReply(reply, { allowLong });
+        // 🚫 نص خطأ مزوّد عمره ما يرجّع كنجاح — GPT وGemini بيتفحصوا وده كان ناقص هنا:
+        // "لم أتمكن..." كان ينفع يرجّع من المسار ده ويتبعت ويخزن
+        if (isErrorText(first)) throw new Error('Groq رجّع نص خطأ');
+        if (!isRepetitive(first, recentBots)) return { reply: first, engine: 'groq' };
+        // الرد قريب من رد سابق → محاولة بنبرة مختلفة تمامًا
+        const alt = await chatGroq({
+          system: fullInstruction + '\n⚠️ ردك السابق على نفس الكلام كان قريب من اللي هتقوله — جاوب بنبرة مختلفة تماماً وابدأ بكلمة تانية خالص.',
           messages: [...convo, userMsg],
           maxTokens: 260,
-          temperature: variants > 0 ? 0.9 : 0.7,
-          topP: 0.8,
+          temperature: 1.0,
+          topP: 0.95,
         });
-        if (reply) {
-          const clean = polishReply(reply, { allowLong });
-          if (!variants || !isRepetitive(clean, profile.lastMessages)) {
-            return { reply: clean, engine: 'groq' };
-          }
-          const alt = await chatGroq({
-            system: fullInstruction + `\n⚠️ ابدأ الرد بكلمة مختلفة تماماً عن أي رد سابق، وغيّر أسلوبك كلياً.`,
-            messages: [...convo, userMsg],
-            maxTokens: 260,
-            temperature: 1.0,
-            topP: 0.9,
-          });
-          if (alt) return { reply: polishReply(alt, { allowLong }), engine: 'groq' };
+        if (alt) {
+          const altClean = polishReply(alt, { allowLong });
+          if (!isErrorText(altClean)) return { reply: altClean, engine: 'groq' };
         }
-        break; // نجح بس مفيش رد صالح — مش هعيد
-      } catch (err) {
-        const rateLimit = /rate|429|limit/i.test(err.message ?? '');
-        if (rateLimit && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1200)); // استنى شوية وحاول تاني
-          continue;
-        }
-        console.error('⚠️ Groq فشل:', err.message?.slice(0, 80));
-        break;
+        // البديل فشل — الأول سليم (بس شبه قديمه) أفضل من ما نرمي الرسالة
+        if (!isErrorText(first)) return { reply: first, engine: 'groq' };
       }
+    } catch (err) {
+      console.error('⚠️ Groq فشل:', err.message?.slice(0, 80));
+      if (first && !isErrorText(first)) return { reply: first, engine: 'groq' };
     }
   }
 
@@ -330,7 +367,9 @@ export async function chatWithAI({
   // ميحسش إن البوت كسر خالص.
   try {
     const sim = await api.simsimi(text.slice(0, 200)).catch(() => null);
-    if (sim?.trim()) return { reply: polishReply(sim, { allowLong }), engine: 'simsimi' };
+    // ⚠️ نص خطأ المزوّد مش رد — قبل الفحص ده كان بيرجّع كنجاح فيتخزن
+    // في الذاكرة ويتبعت للمستخدم (خصوصًا من chat.js اللي مفيهوش فحص)
+    if (sim?.trim() && !isErrorText(sim)) return { reply: polishReply(sim, { allowLong }), engine: 'simsimi' };
   } catch {}
 
   const canned = offlineReply(text, { isInsult, profile });
@@ -343,29 +382,65 @@ export async function chatWithAI({
 // ⚠️ المفاتيح لازم تكون نفس الأسماء اللي `detectMood` بتخزّنها في الذاكرة
 // (زعلان/تعبان/قلقان/مبسوط/حبيت) — قبل كده كانت بالإنجليزي فمعظم
 // ردود المزاج ما كانتش بتظهر خالص.
+// كل مزاج له أكتر من رد — نفس الموقف مرتين ميوصلش نفس الكلام حرفيًا.
 const OFFLINE_BY_MOOD = {
-  زعلان: 'والله يا صاحبي الكلام ده وجعني معاك 🤍 مفيش كلام أطمّنك بيه غير إنك قلتّه، وأنا فاكر كله.',
-  تعبان: 'إنت تعبان يا واد، قوم اتنفس وشرب مية وأرجع بعدين — الدنيا هتفضل مكانها.',
-  قلقان: 'خد نفس يا باشا، القلق ده بيكبر في دماغك لوحده. قولّي إيه اللي مقلقك بالظبط وأنا معاك.',
-  مبسوط: 'يا سلام عليك يا حبيبي 😄 كلامك ده بيحلّي اليوم، قولّي تاني في أي وقت 💚',
-  حبيت: 'يا حبيبي 🥰 الكلام الحلو ده بيفرحني، خلّيني أعيده في دماغي على طول. بحبك 🫶',
+  زعلان: [
+    'والله يا صاحبي الكلام ده وجعني معاك 🤍 مفيش كلام أطمّنك بيه غير إنك قلتّه، وأنا فاكر كله.',
+    'يا راجل ماتزعلش كده 🥺 خد نفَس وسيب الموضوع علينا — وأنا معاك في أي وقت.',
+  ],
+  تعبان: [
+    'إنت تعبان يا واد، قوم اتنفس وشرب مية وأرجع بعدين — الدنيا هتفضل مكانها.',
+    'ارتح يا معلم، الدنيا مش هتسيبك لو نمت شوية 😄 لما ترجع قولّي وأنا معاك.',
+  ],
+  قلقان: [
+    'خد نفس يا باشا، القلق ده بيكبر في دماغك لوحده. قولّي إيه اللي مقلقك بالظبط وأنا معاك.',
+    'متخليش الهم ياكل عليك يا صاحبي 💚 اقسمها لحاجات صغيرة وابدأ بواحدة — وأنا معاك خطوة بخطوة.',
+  ],
+  مبسوط: [
+    'يا سلام عليك يا حبيبي 😄 كلامك ده بيحلّي اليوم، قولّي تاني في أي وقت 💚',
+    'ده كلام يفرّح 🎉 مبروك عليك — وريني باقي الحكاية كمان!',
+  ],
+  حبيت: [
+    'يا حبيبي 🥰 الكلام الحلو ده بيفرحني، خلّيني أعيده في دماغي على طول. بحبك 🫶',
+    'قلبي اتدلع من كلامك النهاردة 🫶 فضل كده دايمًا يا أجمل صاحب.',
+  ],
 };
+
+// ردود الحالات العامة — بنختار منها عشوائي عشان مايبانش قالب ميت
+const OFFLINE_GENERIC = {
+  شكر: [
+    'العفو يا غالي 😄 أي حاجة تانية أنا موجود.',
+    'دايمًا تحت أمرك يا معلم 🤝 ابعت في أي وقت.',
+  ],
+  ترحيب: [
+    'أهلاً بيك يا صاحبي 😄 قاعد فين، عاملين إيه النهارده؟',
+    'يا أهلاً يا غالي! 😄 إيه الأخبار؟ احكيلي إيه اللي حصل النهارده.',
+  ],
+  سؤال: [
+    '🤔 الشبكة بتأخر شوية — جرّب السؤال تاني وأنا جايك بالتفاصيل.',
+    '🤔 اتأخرت عليك النهاردة — ابعته تاني وأنا أسدّدهولك على طول.',
+  ],
+  عام: [
+    '🤍 أنا سامعك يا باشا، بس الشبكة بتقطع شوية دلوقتي. جرّب تاني بعد شوية وأنا هنا.',
+    '🤍 وصلني كلامك يا معلم — الشبكة مش حاضية دلوقتي، ابعتلي تاني بعد شوية.',
+  ],
+};
+
+const pickOne = (list) => list[Math.floor(Math.random() * list.length)];
 
 function offlineReply(text, { isInsult, profile }) {
   if (isInsult) {
     return '😏 إنت بتحب الكلام القوي؟ جرّب تاني — أنا مش بلاش منك، بس خلّي في حدود 😂';
   }
-  // lastMood مخزّن كـ { mood, at } مش نص — نقرأMood من الكائن
+  // lastMood مخزّن كـ { mood, at } مش نص — نقرأ Mood من الكائن
   const mood = typeof profile?.lastMood === 'string' ? profile.lastMood : profile?.lastMood?.mood;
-  if (mood && OFFLINE_BY_MOOD[mood]) return OFFLINE_BY_MOOD[mood];
-  if (/(شكرا|شكرًا|thank|merci)/i.test(text)) return 'العفو يا غالي 😄 أي حاجة تانية أنا موجود.';
+  if (mood && OFFLINE_BY_MOOD[mood]) return pickOne(OFFLINE_BY_MOOD[mood]);
+  if (/(شكرا|شكرًا|thank|merci)/i.test(text)) return pickOne(OFFLINE_GENERIC.شكر);
   if (/(سلام|اهلا|اهلاً|ازيك|إزيك|مساء|صباح|هاي|hi|hello)/i.test(text)) {
-    return 'أهلاً بيك يا صاحبي 😄 قاعد فين، عاملين إيه النهارده؟';
+    return pickOne(OFFLINE_GENERIC.ترحيب);
   }
-  if (/\?\s*$/.test(text.trim())) {
-    return '🤔 الشبكة بتأخر شوية — عاّد السؤال تاني وأنا جايك بالتفاصيل.';
-  }
-  return '🤍 أنا سامعك يا باشا، بس الشبكة بتقطع شوية دلوقتي. جرّب تاني بعد شوية وأنا هنا.';
+  if (/\?\s*$/.test(text.trim())) return pickOne(OFFLINE_GENERIC.سؤال);
+  return pickOne(OFFLINE_GENERIC.عام);
 }
 
 export function cleanForVoice(text) {

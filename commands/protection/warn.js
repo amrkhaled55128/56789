@@ -30,8 +30,8 @@ export default {
       text: `📝 السبب: ${reason}\n🔢 عنده دلوقتي: *${count}* من 3\n${count >= 2 ? '🚨 الإنذار الجاي هيطلعه من الجروب!' : ''}`,
       mentions: [target],
       buttons: [
-        { label: '🚫 حظر', id: '.ban' },
-        { label: '🔇 كتم ساعة', id: '.mute' },
+        { label: '🚫 حظر العضو', id: `.ban ${digits}` },
+        { label: '🔇 كتم العضو', id: `.mute ${digits}` },
       ],
     });
   },

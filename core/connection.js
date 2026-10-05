@@ -19,20 +19,23 @@ import { startScheduler } from './proactive.js';
 import { migrateOldData } from './memory.js';
 import { setBotIdentity, clearCanonicalCache } from './identity.js';
 import { startMaintenance } from './maintenance.js';
-import { setGroupsProvider, setApiStatus } from './stats.js';
+import { setGroupsProvider, setApiStatus, setConnected } from './stats.js';
 import { db } from './db.js';
+import { QR_FILE } from './qr-server.js';
 import api, { setOwnerNotifier, onApiStatus } from './api.js';
 
 const logger = pino({ level: 'silent' });
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // ☁️ على Railway: التخزين كله جوّه الـ volume الواحد /app/session
 const SESSION_DIR = join(__dirname, '..', 'session');
-// ملف الـ QR: جوّه الـ volume على السحابة، ومجلد data محليًا
-const QR_FILE = join(__dirname, '..', process.env.RAILWAY_ENVIRONMENT ? 'session' : 'data', 'qr.txt');
+// ملف الـ QR: نفس المسار اللي سيرفر الداشبورد بيقرا منه (مُعرَّف هناك مرة واحدة)
 
 // 🔄 حالة إعادة الاتصال — backoff + منع تداخل المحاولات
 let reconnecting = false;
 let reconnectAttempts = 0;
+// 🔁 عداد إقلاعات ما بعد الـ logout — حماية من لوب لا نهائي لو الجلسة بتتسجل
+// خروج ورا بعض. بيتصفر أول ما الاتصال ينجح.
+let logoutRestarts = 0;
 // دوال الإيقاف عشان ما نعملش intervals مكرّرة على كل reconnect
 let stopScheduler = null;
 let stopMaint = null;
@@ -57,13 +60,20 @@ export async function startBot() {
     console.warn('⚠️ مقدرتش أجيب أحدث إصدار واتساب — هستخدم الإصدار المدمج');
   }
 
-  const { commands, categories, errors } = await loadCommands();
+  const { commands, categories, errors, collisions, shadowedCount } = await loadCommands();
   if (errors.length) {
     console.warn('⚠️ أوامر اتحملت غلط:');
     errors.forEach((e) => console.warn('   •', e));
   }
+  if (collisions.length) {
+    console.warn('⚠️ أسماء أوامر متعارضة (الأول كسب):');
+    collisions.forEach((c) => console.warn(`   • '${c.alias}' → '${c.winner}' غطّى '${c.shadowed}'`));
+  }
+  if (shadowedCount) {
+    console.warn(`⚠️ ${shadowedCount} أمر كل أسمائه متاخدة — مش هيظهر في المنيو ولا ينفذ`);
+  }
   const totalCommands = [...categories.values()].reduce((sum, cmds) => sum + cmds.length, 0);
-  console.log(`📦 تم تحميل ${totalCommands} أمر في ${categories.size} قسم`);
+  console.log(`📦 تم تحميل ${totalCommands} أمر في ${categories.size} قسم${errors.length ? ` (وفشل تحميل ${errors.length})` : ''}`);
 
   const sock = makeWASocket({
     version,
@@ -83,8 +93,10 @@ export async function startBot() {
 
   // 🆔 هوية البوت نفسه — عشان متتخلطش بذاكرة الناس + 🧹 الصيانة الدورية
   setBotIdentity(sock);
+  stopMaint?.();
   stopMaint = startMaintenance();
   startCooldownSweep();
+  stopSweep?.();
   stopSweep = startProtectionSweep();
 
   // 📊 حالة الـ API على الداشبورد — كان بيقول "شغال" دايمًا
@@ -217,20 +229,34 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
 
   if (connection === 'open') {
     saveQr('');
+    setConnected(true);
     resetReconnectBackoff();
+    logoutRestarts = 0; // اتصلّنا بنجاح — عداد الـ logout يبدأ من جديد
     const number = sock.user?.id?.split(':')[0] ?? '';
     console.log(`\n✅ ${config.botName} ${config.botEmoji} شغال! (مرتبط بـ ${number})`);
     console.log(`🧩 البادئة: ${config.prefix} — جرّب اكتب ${config.prefix}menu في أي شات\n`);
   }
 
   if (connection === 'close') {
+    setConnected(false);
     const code = lastDisconnect?.error?.output?.statusCode;
     if (code === DisconnectReason.loggedOut) {
-      console.log('❌ الجلسة اتسجلت خروج — بنمسح بيانات المصادقة بس');
+      console.log('❌ الجلسة اتسجلت خروج — بنمسح بيانات المصادقة وبنولّد QR جديد');
       // ⚠️ كان بيمسح SESSION_DIR كله — وده على Railway فيه data/db.json
       // (لأن DATA_DIR = session/data) يعني كل ذاكرة الناس والاقتصاد
       // والتذكيرات اتمسحت مع ملفات الدخول. دلوقتي بنمسح المصادقة بس.
       clearAuthFiles();
+      // ⛔ قبلكان كنا بنعمل return وخلاص — البوت بيفضل ميت من غير QR جديد
+      // لحد ريستارت يدوي والداشبورد يقول «متصل»! بنشغّل البوت تاني عشان
+      // يتولد QR، مع عداد حماية من اللوب اللانهائي.
+      logoutRestarts++;
+      if (logoutRestarts <= 5) {
+        setTimeout(() => {
+          startBot().catch((err) => console.error('❌ فشل الإقلاع بعد الـ logout:', err.message));
+        }, 2000);
+      } else {
+        console.error('⛔ الـ logout اتكرر 5 مرات — بنوقف الإقلاع التلقائي، راجع اللوج');
+      }
       return;
     }
 
@@ -246,17 +272,29 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
     // جديدة في كل مرة.
     const delay = Math.min(30000, 3000 * 2 ** Math.min(reconnectAttempts, 4));
     reconnectAttempts++;
-    console.log(`🔄 الاتصال قطع (كود ${code}) — إعادة الاتصال بعد ${delay / 1000} ثانية...`);
+    // 🧾 لوج واحد منظم: رقم المحاولة + الكود + سبب مفهوم + مدة الانتظار
+    const reason = DISCONNECT_REASONS[code] ?? 'سبب غير معروف';
+    console.log(`🔄 قطع اتصال #${reconnectAttempts} (كود ${code} — ${reason}) — إعادة المحاولة بعد ${delay / 1000} ثانية...`);
 
     setTimeout(() => {
       startBot()
-        .catch((err) => console.error('❌ فشل إعادة الاتصال:', err))
+        .catch((err) => console.error('❌ فشل إعادة الاتصال:', err.message))
         .finally(() => {
           reconnecting = false;
         });
     }, delay);
   }
 }
+
+// أسماء مفهومة لأكواد قطع الاتصال — عشان اللوج يقول السبب مش رقم غامض
+const DISCONNECT_REASONS = {
+  [DisconnectReason.connectionClosed]: 'الاتصال اتقفل',
+  [DisconnectReason.connectionLost]: 'الاتصال ضاع',
+  [DisconnectReason.connectionReplaced]: 'جلسة جديدة فتحت في مكان تاني',
+  [DisconnectReason.timedOut]: 'المهلة خلصت',
+  [DisconnectReason.restartRequired]: 'محتاج إعادة تشغيل',
+  [DisconnectReason.multilogin]: 'تسجيل دخول متعدد',
+};
 
 // 🧹 مسح ملفات المصادقة فقط — سيب مجلد data (الذاكرة/الاقتصاد) زي ما هو
 function clearAuthFiles() {
@@ -278,7 +316,10 @@ function clearAuthFiles() {
   }
 }
 
-// نتفادى إعادة تحميل الأوامر مرتين لو اتصلح الاتصال بسرعة
+// ✅ نجح الاتصال → نصفّر عداد المحاولات. قبل كده الشرط كان `if (reconnecting)`
+// وده عمره ما بيتحقق: 'open' بيوصّل بعد ما finally بتاع startBot يكون خلص
+// وخمّد reconnecting = false — فالعداد كان بيكبر للأبد، وقطع بسيط متفرق بعد
+// يوم شغل بياخد 30 ثانية انتظار بدل 3 ثواني.
 function resetReconnectBackoff() {
-  if (reconnecting) reconnectAttempts = 0;
+  reconnectAttempts = 0;
 }

@@ -37,8 +37,11 @@ function duels() {
   return db.get('duels', {});
 }
 
-function boardButtons() {
-  return Array.from({ length: 9 }, (_, i) => ({ label: `▫️ ${i + 1}`, id: `.duel mv-${i + 1}` }));
+function boardButtons(board) {
+  if (!board) return Array.from({ length: 9 }, (_, i) => ({ label: `▫️ ${i + 1}`, id: `.duel mv-${i + 1}` }));
+  return board
+    .map((v, i) => (v ? null : { label: `▫️ ${i + 1}`, id: `.duel mv-${i + 1}` }))
+    .filter(Boolean);
 }
 
 function mention(j) {
@@ -125,7 +128,7 @@ export default {
       return sendQuickReplies(sock, m.jid, {
         title: `⚔️ دور ${mention(game.turn === 'X' ? game.pX : game.pO)} ${game.turn === 'X' ? '❌' : '⭕'}`,
         text: [render(game.board), '', 'دوس على المربع اللي هتلعب فيه 👇', '(اكتب .duel cancel للإلغاء)'].join('\n'),
-        buttons: boardButtons(),
+        buttons: boardButtons(game.board),
       });
     }
 
@@ -148,7 +151,7 @@ export default {
         title: '⚔️ المبارزة بدأت! ❌ ضد ⭕',
         text: `${mention(game.pX)} ❌ (يبدأ)\n${mention(game.pO)} ⭕\n\n${render(game.board)}`,
         mentions: [pn(game.pX), pn(game.pO)],
-        buttons: boardButtons(),
+        buttons: boardButtons(game.board),
       });
     }
 

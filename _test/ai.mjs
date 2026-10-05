@@ -6,7 +6,7 @@
  *
  * التشغيل: node _test/ai.mjs
  */
-import { apiHealth, isOpen, noteEmpty } from '../core/api.js';
+import { apiHealth, isOpen, noteEmpty, aiProviderStatus } from '../core/api.js';
 import { hintFor } from '../core/arabic.js';
 import { chatWithAI } from '../core/ai.js';
 

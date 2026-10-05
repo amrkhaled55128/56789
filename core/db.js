@@ -15,29 +15,59 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const saveTimers = new Map();
 
-// قاعدة بيانات بسيطة بصيغة JSON (حفظ مؤجل عشان ميسبقش الأوامر)
-// لما المشروع يكبر نقدر نرقّيها لـ SQLite من غير ما نغير واجهة الاستخدام
+/**
+ * قاعدة بيانات بسيطة بصيغة JSON — حفظ مؤجل (debounce) عشان ميسبقش الأوامر.
+ *
+ * العقد:
+ * - get(key, fallback) بيرجّع المرجع الحي — اللي بيعدّل فيه على مسؤوليته
+ *   وينادي set() أو save() بعدها.
+ * - الكتابة ذرية: ملف tmp + fsync + rename — مايتقطعش نص الكتابة.
+ * - علامة اتساخ (#lastJson): لو المحتوى زي ما اتكتب آخر مرة مفيش rename ولا
+ *   نسخة احتياطية — المندوبات الدورية اللي بتقرا وتكتب نفس القيمة مبتبوّظش القرص.
+ * لما المشروع يكبر نقدر نرقّيها لـ SQLite من غير ما نغير واجهة الاستخدام.
+ */
 class DB {
   constructor(fileName) {
     this.file = join(DATA_DIR, fileName);
     this.backup = join(DATA_DIR, fileName.replace(/\.json$/, '') + '.lastgood.json');
     this.data = this.#read();
+    this.#lastJson = JSON.stringify(this.data, null, 2);
+  }
+
+  #lastJson;
+
+  // 🧊 عزل الملف التالف — بدل ما يضيع بصمت بنسخه باسم فيه الوقت للتشخيص بعدين
+  #quarantineIfPresent(file) {
+    try {
+      if (!fs.existsSync(file)) return;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      fs.copyFileSync(file, `${file}.corrupt-${stamp}`);
+      console.error(`🧊 تم عزل الملف التالف للتشخيص: ${file}.corrupt-${stamp}`);
+    } catch {
+      // العزل رفاهية — لو فشل بنكمل للنسخة الاحتياطية
+    }
   }
 
   #read() {
     // ⚠️ كان بيرجع {} عند أي فشل — فملف مقطوع (redeploy أثناء الكتابة) كان
     // بيمسح كل الذاكرة والاقتصاد بصمت من غير أي لوج. دلوقتي بنحاول ملف
-    // النسخة الصح قبل ما نستسلم.
+    // النسخة الصح قبل ما نستسلم + بنعزل التالف بدل ما يضيع.
     for (const file of [this.file, this.backup]) {
       try {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (file !== this.file) {
-          console.log(`⚠️ الملف الرئيسي تالف — رجعنا من النسخة: ${file}`);
+        // بنقبل object بس — ملف فيه null/array/رقم مش قاعدة بيانات
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          if (file !== this.file) {
+            console.log(`⚠️ الملف الرئيسي تالف — رجعنا من النسخة: ${file}`);
+          }
+          return parsed;
         }
-        return parsed;
+        console.error(`⚠️ محتوى ${file} مش شكل قاعدة بيانات — بنطمن منه`);
+        this.#quarantineIfPresent(file);
       } catch (err) {
         if (err.code !== 'ENOENT') {
           console.error(`⚠️ تعذّر قراءة ${file}:`, err.message?.slice(0, 80));
+          this.#quarantineIfPresent(file);
         }
       }
     }
@@ -53,6 +83,7 @@ class DB {
     this.save();
   }
 
+  // حفظ مؤجل: آخر set في 250ms هو اللي بيكتب فعلاً
   save() {
     clearTimeout(saveTimers.get(this.file));
     saveTimers.set(
@@ -61,15 +92,24 @@ class DB {
     );
   }
 
-  // ⚠️ الكتابة لازم تكون atomic: نكتب في ملف مؤقت وبعدين نعمل rename.
+  // ⚠️ الكتابة لازم تكون atomic: نكتب في ملف مؤقت ونعمل fsync وبعدين rename.
   // writeFileSync بيفتح الملف بـ O_TRUNC — فـ SIGKILL من Railway في نص الكتابة
   // كان بيسيب الملف مقطوع، والقراءة الجاية بتلاقي JSON.parse فاشل.
+  // والكتابة نفسها بتتخطى لو المحتوى متغيرش عن آخر نسخة مكتوبة (علامة الاتساخ).
   #write() {
     saveTimers.delete(this.file);
+    const json = JSON.stringify(this.data, null, 2);
+    if (json === this.#lastJson) return; // مفيش اتساخ — القرص براحته
+
     const tmp = `${this.file}.tmp`;
     try {
-      const json = JSON.stringify(this.data, null, 2);
-      fs.writeFileSync(tmp, json);
+      const fd = fs.openSync(tmp, 'w');
+      try {
+        fs.writeSync(fd, json);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
       // نحتفظ بالنسخة الصح قبل ما نستبدل
       try {
         if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.backup);
@@ -77,6 +117,7 @@ class DB {
         // النسخة الاحتياطية رفاهية — لو فشلت هنكمل
       }
       fs.renameSync(tmp, this.file);
+      this.#lastJson = json;
     } catch (err) {
       console.error('❌ فشل حفظ قاعدة البيانات:', err.message?.slice(0, 100));
       try {
@@ -93,6 +134,11 @@ class DB {
     const timer = saveTimers.get(this.file);
     if (timer) {
       clearTimeout(timer);
+      this.#write();
+      return true;
+    }
+    // من غير مؤقت بس في تعديلات ماتكتبتش (مثلاً set بعد flush مباشرة)
+    if (JSON.stringify(this.data, null, 2) !== this.#lastJson) {
       this.#write();
       return true;
     }

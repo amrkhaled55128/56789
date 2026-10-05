@@ -2,12 +2,93 @@ import { db } from './db.js';
 import api from './api.js';
 import { CONTACTS } from '../config.js';
 import { findContact, normalize } from './identity.js';
+import { groqQuick, isGroqReady } from './groq.js';
 
-// 🧠 ذاكرة نوفا طويلة المدى — مينساش حد ولا اسم ولا ذكرى
+// 🧠 ذاكرة استرو طويلة المدى — مينساش حد ولا اسم ولا ذكرى
 // البروفايل: { name, facts[], memories[{at,text}], lastMessages[], mood, tone, lastSeen, msgCount }
 
 const MAX_MEMORIES = 15;
-const EXTRACT_EVERY = 8; // كل 8 رسايل من المستخدم نستخرج ذكرى
+const MEMORY_FORGET_DAYS = 45; // الذكرى الخفيفة القديمة بتتنسى خالص بعد كده
+export const EXTRACT_EVERY = 8; // كل 8 رسايل من المستخدم نستخرج ذكرى
+
+// ⚖️ وزن الذكرى — أساس النسيان التدريجي:
+// الذكرى بتفقد قيمتها مع الوقت (بتقلّص نص قوتها كل ~14 يوم تقريبًا) وبتتقوى
+// كل ما تتذكر تاني (hits) — والمثبّتة (حظوظ كبيرة: جواز/امتحان/شغل جديد)
+// عمرها ما تتشال مهما قدمت. قبل كده كان القطع slice(-15) بيلغي الأقدم
+// دايمًا حتى لو أهم حاجة قالتها الشخص في حياته.
+function memoryWeight(m) {
+  const ageDays = Math.max(0, (Date.now() - (m.at ?? Date.now())) / 86400000);
+  const recency = 50 * Math.exp(-ageDays / 14);
+  const pins = m.pin ? 1000 : 0;
+  const uses = (m.hits ?? 0) * 40;
+  return pins + uses + recency;
+}
+
+// 🧹 النسيان التدريجي: القديمة الخفيفة بتتسى وتتنسى، وفوق السقف الأضعف
+// وزنًا هو اللي يمشي (مش الأقدم بالضرورة) — والترتيب الزمني بيفضل محفوظ.
+function pruneMemories(memories) {
+  const kept = memories.filter((m) => {
+    if (!m?.text) return false;
+    if (m.pin) return true;
+    const ageDays = Math.max(0, (Date.now() - (m.at ?? Date.now())) / 86400000);
+    if (ageDays > MEMORY_FORGET_DAYS && memoryWeight(m) < 10) return false; // اتنست
+    return true;
+  });
+  if (kept.length <= MAX_MEMORIES) return kept;
+  return kept
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => memoryWeight(b.m) - memoryWeight(a.m) || a.i - b.i)
+    .slice(0, MAX_MEMORIES)
+    .sort((a, b) => a.i - b.i)
+    .map(({ m }) => m);
+}
+
+// 🔤 كلمات وظيفية ما تنفعش للربط بين الذكرى والكلام الحالي
+const STOP_WORDS = /^(?:الي|من|في|على|عن|ده|دي|دا|ان|انا|احنا|انت|بتاع|يعني|اهو|فوق|تحت|او|ولا|اللي|كده|كدا|خلاص|تمام|ايوه|أيوه|ليه|ازاي|فين|امتى|مين|ايه|بس|علشان|عشان|بقى|دلوقتي)$/;
+
+function wordsOf(t) {
+  return new Set(
+    String(t ?? '')
+      .toLowerCase()
+      .replace(/[أإآٱ]/g, 'ا')
+      .replace(/ة/g, 'ه')
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((w) => w.length > 2 && !STOP_WORDS.test(w)),
+  );
+}
+
+// 🔁 هل النصين قريبين لحد ما يبقوا نفس الذكرى بغلافين؟ (نسبة كلمات مشتركة)
+function nearDuplicate(a, b) {
+  const wa = wordsOf(a);
+  const wb = wordsOf(b);
+  if (!wa.size || !wb.size) return false;
+  let shared = 0;
+  for (const w of wa) if (wb.has(w)) shared++;
+  return shared / Math.min(wa.size, wb.size) >= 0.7;
+}
+
+// 🎯 الذكريات الأنسب للكلام الحالي — التقاطع مع الرسالة لوّنها، والحداثة يكسر التعادل.
+// من غيرها كنا بنحقن "أحدث 3" دايماً: لو المستخدم رجع عن موضوع قديم، البوت
+// كان بيفكر في آخر ذكرى بلا علاقة باللي بيتكلم عنه.
+export function pickRelevantMemories(profile, currentText = '', n = 3) {
+  const mems = profile?.memories ?? [];
+  if (!mems.length) return [];
+  const cur = wordsOf(currentText);
+  const now = Date.now();
+  const scored = mems.map((m) => {
+    const mw = wordsOf(m.text);
+    let overlap = 0;
+    for (const w of mw) if (cur.has(w)) overlap++;
+    const relevance = cur.size ? overlap / cur.size : 0;
+    const ageDays = (now - (m.at ?? now)) / 86400000;
+    const recency = 1 / (1 + ageDays / 14); // الأسبوعين حدث واضح، القديمة ما تختفيش
+    // التثبيت والتكرار بيرفعوا وزن الذكرى (نفس منطق النسيان التدريجي)
+    const strength = (m.pin ? 0.5 : 0) + Math.min(m.hits ?? 0, 5) * 0.1;
+    return { m, score: relevance * 2 + recency * 0.4 + strength };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, n).map((s) => s.m);
+}
 
 function users() {
   return db.get('users', {});
@@ -56,13 +137,27 @@ export function rememberMessage(key, role, text) {
   saveProfile(key, p);
 }
 
-export function rememberMemory(key, text) {
+// 🧠 تثبيت ذكرى — pinned = حظوظ كبيرة (جواز/امتحان/شغل جديد) عمرها ما تتنسى
+export function rememberMemory(key, text, { pinned = false } = {}) {
   const p = getProfile(key);
   const memories = p.memories ?? [];
   const clean = String(text).trim().slice(0, 150);
-  if (!clean || memories.some((m) => m.text === clean)) return false;
+  if (!clean) return false;
+  // التطابق الحرفي + القريب منه: "شغالة في شركة تصاميم" و"بتشتغل في شركة تصاميم"
+  // مش ذكرى مختلفة — والإعادة بتقوّي الذكرى الموجودة (hits) بدل ما نتجاهلها
+  const existing = memories.find((m) => m.text === clean || nearDuplicate(m.text, clean));
+  if (existing) {
+    existing.hits = (existing.hits ?? 0) + 1;
+    existing.at = Date.now(); // آخر مرة اتذكرت — بتحسب في وزن النسيان
+    if (pinned) existing.pin = true;
+    p.memories = pruneMemories(memories);
+    saveProfile(key, p);
+    return false;
+  }
   // ⚠️ مهم: بنكتب على نفس الـ object عشان مايضيعش بالتحديث المتأخر من saveProfile
-  p.memories = [...memories, { at: Date.now(), text: clean }].slice(-MAX_MEMORIES);
+  const entry = { at: Date.now(), text: clean, hits: 0 };
+  if (pinned) entry.pin = true;
+  p.memories = pruneMemories([...memories, entry]);
   saveProfile(key, p);
   return true;
 }
@@ -163,8 +258,8 @@ export function learnFromText(key, text) {
   const facts = p.facts ?? [];
   let changed = false;
 
-  // الاسم — بكل صيغه (بهمزة أو بدون، و"اسمي"/"اسمي"/"اسمي")
-  const nameMatch = /(?:اسمي|اسمي|اسمي|إسمي|إسمي|انا اسمي|أنا اسمي)\s+([\p{L}\p{N}]{2,20})/u.exec(text);
+  // الاسم — بكل صيغه (بهمزة أو بدون، و"اسمي" أو "أنا اسمي")
+  const nameMatch = /(?:أنا\s+)?(?:إسمي|اسمي)\s+([\p{L}\p{N}]{2,20})/u.exec(text);
   if (nameMatch && nameMatch[1] !== p.name) {
     p.name = nameMatch[1];
     changed = true;
@@ -194,10 +289,10 @@ export function learnFromText(key, text) {
     }
   }
 
-  // 🔍 لحظات مهمة تستاهل ذكرى
+  // 🔍 لحظات مهمة تستاهل ذكرى — بتتثبّت (pin) عشان النسيان التدريجي ما يمسهاش
   const bigMoment = /(?:سافرت|عندي (?:امتحان|مقابلة|شغل جديد)|اتخرجت|بشتغل دلوقتي|سكنت|جوازي|خطوبتي|مريض|دخلت (?:الجامعة|الجيش)|خلصت مشروع)/.test(text);
   if (bigMoment) {
-    rememberMemory(key, text.slice(0, 120));
+    rememberMemory(key, text.slice(0, 120), { pinned: true });
   }
 
   if (changed) {
@@ -208,6 +303,7 @@ export function learnFromText(key, text) {
 }
 
 // 💭 استخراج ذكرى من آخر محادثة — نداء AI سريع، بيتنادى كل EXTRACT_EVERY رسالة
+// ⚡ أولاً groqQuick (مفتاحنا — أرخص وأسرع من engez) وapi.gpt احتياط لو مفيش مفتاح
 export async function extractMemory(key) {
   const p = getProfile(key);
   const convo = (p.lastMessages ?? [])
@@ -217,11 +313,28 @@ export async function extractMemory(key) {
     .slice(0, 700);
   if (!convo || convo.length < 20) return false;
 
+  // كلام من غير جوهر (تحيات وقصير) ما يستحقش نداء استخراج أصلاً
+  const meaningful = convo.split(/\s+/).filter((w) => wordsOf(w).size).length;
+  if (meaningful < 4) return false;
+
+  const prompt =
+    `من الكلام ده استخرج معلومة شخصية واحدة مهمة عن "${p.name ?? 'الشخص'}" — ` +
+    `حاجة تستاهل تتفتكر بعدين (عمله أو دراسته، خبر حصلله، حاجة بتحبها أو يكرهها، هدف أو مشكلة عنده). ` +
+    `ذكّر بالتفاصيل الملموسة (أسماء وأماكن وأرقام) من غير ما تنقل كلامه حرفياً. ` +
+    `رد بالمعلومة بس في سطر واحد قصير بالعامية المصرية، ولو مفيش حاجة مهمة رد بالحرفين: مفيش\n\nالكلام: ${convo}`;
+
+  const extract = async () => {
+    if (isGroqReady()) {
+      try {
+        return await groqQuick('انت مساعد استخراج بيانات — رد بس بالمطلوب بدون أي شرح.', prompt, 90);
+      } catch {}
+    }
+    return api.gpt(prompt);
+  };
+
   try {
-    const raw = await api.gpt(
-      `من الكلام ده استخرج معلومة شخصية واحدة مهمة عن "${p.name ?? 'الشخص'}" — حاجة تستاهل تتفتكر بعدين (عمله، خلافه، خبر حصلله، حاجة بتحبها). رد بالمعلومة بس في سطر واحد قصير بالعامية المصرية، ولو مفيش حاجة مهمة رد بالحرفين: مفيش\n\nالكلام: ${convo}`,
-    );
-    const clean = raw.trim().replace(/^["'-]+|["'-]+$/g, '');
+    const raw = await extract();
+    const clean = String(raw ?? '').trim().replace(/^["'-]+|["'-]+$/g, '');
     if (clean && clean.length > 5 && clean.length < 150 && !/مفيش|لا يوجد|لا توجد/i.test(clean)) {
       return rememberMemory(key, clean);
     }
@@ -236,7 +349,8 @@ export function absenceHours(profile) {
 }
 
 // نص سياق جاهز للحقن في تعليمات الـ AI — بيحترم ميزانية طول الرابط
-export function contextBlock(profile, pushName, budget = 300) {
+// currentText اختياري: بيرتب الذكريات بالأنسب للكلام الحالي مش بالأحدث بس
+export function contextBlock(profile, pushName, budget = 300, currentText = '') {
   const lines = [];
   const name = profile.name ?? (pushName !== 'صديقي' ? pushName : null);
   if (name) lines.push(`- اسمه: "${name}"`);
@@ -252,14 +366,12 @@ export function contextBlock(profile, pushName, budget = 300) {
     }
   }
 
-  let block = lines.join('\n');
+  // 💭 الذكريات الأنسب للسياق (٣ بحد أقصى)
+  const mems = pickRelevantMemories(profile, currentText, 3);
+  const memLine = mems.length ? '- ذكريات من كلامه قبل كده: ' + mems.map((m) => m.text).join(' • ') : '';
 
-  // 💭 الذكريات — أحدث 3
-  const mems = (profile.memories ?? []).slice(-3);
-  if (mems.length) {
-    const memLine = '- ذكريات من كلامه قبل كده: ' + mems.map((m) => m.text).join(' • ');
-    if (block.length + memLine.length + 1 < budget) block += (block ? '\n' : '') + memLine;
-  }
+  let block = [lines.join('\n'), memLine].filter(Boolean).join('\n');
+  if (block.length > budget) block = block.slice(0, budget);
 
   // آخر الكلام — بنلحق اللي يملا الميزانية
   const convoParts = [];
@@ -268,7 +380,9 @@ export function contextBlock(profile, pushName, budget = 300) {
     const line = `${msgs[i].role === 'user' ? 'هو قال' : 'إنت ردت'}: ${msgs[i].text.slice(0, 120)}`;
     if (block.length + line.length + 1 > budget) break;
     convoParts.unshift(line);
-    block = lines.join('\n') + (mems.length ? '\n' + mems.map((m) => '- ذكرى: ' + m.text).join('\n') : '') + (convoParts.length ? '\nآخر الكلام:\n' + convoParts.join('\n') : '');
+    block = [lines.join('\n'), memLine, convoParts.length ? 'آخر الكلام:\n' + convoParts.join('\n') : '']
+      .filter(Boolean)
+      .join('\n');
   }
 
   return { block };
@@ -299,16 +413,20 @@ function mergeProfiles(a, b) {
   const out = JSON.parse(JSON.stringify(a));
   // المعلومات: اتحاد بدون تكرار
   out.facts = [...new Set([...(a.facts ?? []), ...(b.facts ?? [])])].slice(-10);
-  // الذكريات: اتحاد بدون تكرار مرتب بالزمن
-  const seen = new Set();
-  out.memories = [...(a.memories ?? []), ...(b.memories ?? [])]
-    .filter((m) => {
-      if (!m?.text || seen.has(m.text)) return false;
-      seen.add(m.text);
-      return true;
-    })
-    .sort((x, y) => (x.at ?? 0) - (y.at ?? 0))
-    .slice(-MAX_MEMORIES);
+  // الذكريات: اتحاد بدون تكرار مرتب بالزمن — والمكررة بتدمج قوتها (hits/pin)
+  const byText = new Map();
+  for (const m of [...(a.memories ?? []), ...(b.memories ?? [])]) {
+    if (!m?.text) continue;
+    const cur = byText.get(m.text);
+    if (!cur) {
+      byText.set(m.text, { ...m });
+      continue;
+    }
+    cur.hits = Math.max(cur.hits ?? 0, m.hits ?? 0);
+    if (m.pin) cur.pin = true;
+    if ((m.at ?? 0) > (cur.at ?? 0)) cur.at = m.at;
+  }
+  out.memories = pruneMemories([...byText.values()].sort((x, y) => (x.at ?? 0) - (y.at ?? 0)));
   // آخر الكلام: بدون تكرار — آخر ظهور للجملة يكسب مكانه
   const convo = new Map();
   for (const msg of [...(a.lastMessages ?? []), ...(b.lastMessages ?? [])]) {

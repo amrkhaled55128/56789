@@ -67,17 +67,18 @@ export default {
       }
 
       if (guess === game.answer) {
+        const meKey = m.identityKey ?? m.sender;
         const stats = db.get('mathStats', {});
-        const me = stats[m.sender] ?? { points: 0 };
+        const me = stats[meKey] ?? { points: 0 };
         me.points++;
-        stats[m.sender] = me;
+        stats[meKey] = me;
         delete all[m.jid];
         db.set('math', all);
         db.set('mathStats', stats);
-        const coins = addCoins(m.identityKey ?? m.sender, 15);
+        const coins = addCoins(meKey, 15);
         return sendQuickReplies(sock, m.jid, {
           title: `🎉 إجابة صحيحة يا *${m.pushName}*!`,
-          text: `${game.q} ✅\n\n💰 +${coins - (coins - 15)} عملة (رصيدك ${coins})\n📊 نقاطك: *${me.points}*\n\nسؤال جديد؟`,
+          text: `${game.q} ✅\n\n💰 +15 عملة (رصيدك الحالي: ${coins})\n📊 نقاطك: *${me.points}*\n\nعايز سؤال جديد؟ 👇`,
           buttons: [{ label: '🧮 سؤال جديد', id: '.math' }],
         });
       }
