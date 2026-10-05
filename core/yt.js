@@ -70,6 +70,12 @@ async function ytdlBin() {
   if (binChecked) return binPath;
   if (binPromise) return binPromise;
   binPromise = (async () => {
+    // 1) فحص وجود yt-dlp في النظام مباشرة (Nixpacks / Linux / PATH)
+    if (await executable('yt-dlp')) {
+      binPath = 'yt-dlp';
+      return binPath;
+    }
+
     let candidate = null;
     try {
       candidate = youtubedl.binaryPath ? await youtubedl.binaryPath() : null;
@@ -77,7 +83,6 @@ async function ytdlBin() {
       candidate = null;
     }
 
-    // binaryPath() بيرجّع المسار حتى لو postinstall اتخطّى التنزيل.
     if (await executable(candidate)) {
       binPath = candidate;
       return binPath;
@@ -124,28 +129,33 @@ async function withTempDir(fn) {
 }
 
 /**
- * ينزّل من يوتيوب ويرجّع Buffer
+ * ينزّل من يوتيوب/فيسبوك/تيك توك ويرجّع Buffer
  * @param {string} url
  * @param {'audio'|'video'} kind
  */
-export async function downloadYoutube(url, kind = 'audio', { height = 720, timeout = 180000 } = {}) {
+export async function downloadYoutube(url, kind = 'audio', { height = 720, timeout = 120000 } = {}) {
   const bin = await ytdlBin();
   if (bin) {
     try {
       return await withTempDir(async (dir) => {
         const args = [
-          '--no-warnings', '--no-playlist', '--no-call-home', '--no-progress',
-          '--no-check-certificate', '--newline',
-          '-f', kind === 'audio' ? 'bestaudio/best' : `bestvideo[height<=${height}][ext=mp4]+bestaudio/best[height<=${height}]/best[height<=${height}]/best`,
+          '--no-warnings',
+          '--no-playlist',
+          '--no-progress',
+          '--no-check-certificate',
           '-o', path.join(dir, 'media.%(ext)s'),
-          url,
         ];
-        if (kind === 'audio') {
-          args.unshift('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '128K');
+        if (ffmpegPath) {
+          args.push('--ffmpeg-location', path.dirname(ffmpegPath));
         }
-        if (ffmpegPath) args.unshift('--ffmpeg-location', path.dirname(ffmpegPath));
+        if (kind === 'audio') {
+          args.push('-x', '--audio-format', 'mp3', '--audio-quality', '128K', '-f', 'bestaudio/ba/b');
+        } else {
+          args.push('-f', `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]/b[height<=${height}]/bv*+ba/b`);
+        }
+        args.push(url);
 
-        const { stderr } = await run(bin, args, { timeout, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+        const { stderr } = await run(bin, args, { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
         const files = await fs.readdir(dir);
         const found = files.find((f) => !f.endsWith('.part'));
         if (!found) throw new Error(`yt-dlp ماخلّيش ملف: ${String(stderr).slice(-120)}`);
@@ -156,11 +166,9 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
     }
   }
 
-  // الـAPI الحالي يرجّع SaveNow HTML/إعلانات بدل ملف. لا نعيده كـ fallback
-  // لأن المستخدم ينتظر طويلاً ثم يستلم خطأ مؤكد. نعلن الفشل بسرعة وبوضوح.
   throw new Error(bin
-    ? 'yt-dlp فشل في الفيديو ده؛ مصدر التحميل الاحتياطي غير متاح حالياً'
-    : 'yt-dlp غير متاح على الخادم ومصدر التحميل الاحتياطي غير صالح حالياً');
+    ? 'تعذر التحميل عبر المحرك المحلي؛ يرجى التحقق من الرابط'
+    : 'محرك التحميل غير متاح حالياً');
 }
 
 /**

@@ -24,9 +24,9 @@ function loadCache(jid, type) {
 
 export default {
   name: 'yt',
-  aliases: ['يوتيوب', 'ytvideo', 'dlvideo'],
-  description: 'حمّل فيديو من يوتيوب — .yt اسم الفيديو',
-  usage: '.yt مقطع مضحك',
+  aliases: ['يوتيوب', 'فيديو_يوتيوب', 'ytvideo', 'نزل_فيديو', 'dlvideo'],
+  description: 'حمّل فيديو من يوتيوب بجودة عالية أو صوت — .يوتيوب <اسم الفيديو>',
+  usage: '.يوتيوب توم وجيري حلقة كاملة',
   async execute(sock, m, args) {
     const text = args.join(' ').trim();
 

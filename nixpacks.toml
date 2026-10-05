@@ -1,0 +1,9 @@
+# Railway Nixpacks Configuration for Nova / Astro WhatsApp Bot
+[phases.setup]
+nixPkgs = ["nodejs_20", "ffmpeg", "yt-dlp", "python3"]
+
+[phases.build]
+cmds = ["npm ci --omit=dev || npm install --omit=dev"]
+
+[start]
+cmd = "node index.js"
