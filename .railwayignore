@@ -5,8 +5,14 @@ data
 backups
 *.log
 _test*
+_test/
 ecosystem.config.cjs
 README.md
-
+audio.mp3
+*.mp3
+*.mp4
+*.tmp
+_rel.txt
+.zcode/
 .env-railway
 .gitignore

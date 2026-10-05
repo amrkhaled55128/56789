@@ -3,7 +3,7 @@ import { sendQuickReplies } from '../../core/send.js';
 // 🃏 .about — كارت استرو الكامل + أزرار تعريف
 export default {
   name: 'about',
-  aliases: ['تعريف', 'من_انت', 'عن_البوت', 'كارت', 'بطاقه', 'شخصيتك', 'الهكزه', 'الهكزة'],
+  aliases: ['تعريف', 'من_انت', 'عن_البوت', 'كارت', 'بطاقه', 'شخصيتك'],
   description: 'مين استرو — كارته الكامل وشخصيته ومميزاته',
   usage: '.about',
   async execute(sock, m, args) {
