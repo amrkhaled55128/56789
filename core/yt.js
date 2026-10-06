@@ -30,11 +30,13 @@ let binPromise = null;
 
 // تنزيل provisioning يعمل مرة واحدة، بحد أقصى 180 ثانية و100MB.
 async function downloadBinary() {
-  const name = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+  const isWin = process.platform === 'win32';
+  const name = isWin ? 'yt-dlp.exe' : 'yt-dlp';
+  const downloadFile = isWin ? 'yt-dlp.exe' : 'yt-dlp_linux';
   const dir = path.join(HERE, '..', 'node_modules', 'youtube-dl-exec', 'bin');
   const dest = path.join(dir, name);
   const temp = `${dest}.download`;
-  const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${name}`;
+  const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${downloadFile}`;
 
   await fs.mkdir(dir, { recursive: true });
   const res = await fetch(url, { signal: AbortSignal.timeout(180000) });
@@ -43,11 +45,15 @@ async function downloadBinary() {
   if (bytes.length < 1_000_000 || bytes.length > 100 * 1024 * 1024) {
     throw new Error(`حجم binary غير متوقع: ${bytes.length}`);
   }
-  // HTML error page أو rate limit ممكن يرجع 200؛ لا نحفظه كملف تنفيذي.
-  if (process.platform !== 'win32' && !(bytes[0] === 0x7f && bytes.subarray(1, 4).toString() === 'ELF')) {
-    throw new Error('الرد ليس Linux ELF binary');
+  // التحقق من صحة الملف التنفيذي
+  const isElf = bytes[0] === 0x7f && bytes.subarray(1, 4).toString() === 'ELF';
+  const isExe = bytes.subarray(0, 2).toString() === 'MZ';
+  const isScript = bytes.subarray(0, 2).toString() === '#!' || bytes.subarray(0, 2).toString() === 'PK';
+
+  if (!isWin && !isElf && !isScript) {
+    throw new Error('الرد ليس ملف تنفيذي صالح للينكس');
   }
-  if (process.platform === 'win32' && bytes.subarray(0, 2).toString() !== 'MZ') {
+  if (isWin && !isExe) {
     throw new Error('الرد ليس Windows executable');
   }
   await fs.writeFile(temp, bytes);
@@ -139,6 +145,7 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
     try {
       return await withTempDir(async (dir) => {
         const args = [
+          '--proxy', '',
           '--no-warnings',
           '--no-playlist',
           '--no-progress',
