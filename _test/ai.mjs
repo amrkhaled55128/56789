@@ -48,5 +48,20 @@ check('اقتراح تنزيل الأغاني', hintFor('إزاي أنزل أغ�
 check('اقتراح التذكيرات بالاسم الفعلي', hintFor('فكرني بعد ساعة') === 'ذكرني');
 check('لا يخمن اقتراحًا من لا شيء', hintFor('السلام عليكم يا صاحبي') === null);
 
+console.log('\n🧠 الذاكرة وتفضيل اللغة');
+const { rememberMemory, getProfile, deleteMemory, clearMemories, setLanguage } = await import('../core/memory.js');
+const testKey = '201999999999@s.whatsapp.net';
+clearMemories(testKey);
+check('تصفير الذاكرة يرجع 0 في البداية', getProfile(testKey).memories.length === 0);
+rememberMemory(testKey, 'بيحب الكشري بالصلصة', { pinned: true });
+check('حفظ ذكرى مثبتة بنجاح', getProfile(testKey).memories.length === 1 && getProfile(testKey).memories[0].pin === true);
+rememberMemory(testKey, 'بيحب الكشري بالصلصة', { pinned: true });
+check('منع تكرار نفس الذكرى وزيادة hits', getProfile(testKey).memories.length === 1 && getProfile(testKey).memories[0].hits === 1);
+const del = deleteMemory(testKey, 0);
+check('حذف ذكرى بالرقم', del.text === 'بيحب الكشري بالصلصة' && getProfile(testKey).memories.length === 0);
+setLanguage(testKey, 'msa');
+check('تحديد لغة البروفايل (msa)', getProfile(testKey).lang === 'msa');
+
 console.log(`\n✅ ${pass} | ❌ ${fail}`);
 process.exit(fail ? 1 : 0);
+

@@ -123,6 +123,15 @@ function buildInstruction(profile, pushName, contact, { voice, extra, mood, mode
   // 😌 مود استرو نفسه — بيتغير باليوم (ثابت طول النهار) عشان الشخصية تفضل حية
   if (BOT_MOODS.length) parts.push(BOT_MOODS[Math.floor(Date.now() / 86400000) % BOT_MOODS.length]);
 
+  // 🔤 تفضيل اللغة للشخص (مصري / فصحى / إنجليزي / فرانكو)
+  if (profile.lang === 'msa') {
+    parts.push('🔤 لغة التخاطب: رد عليه باللغة العربية الفصحى المبسطة والمهذبة بدل العامية.');
+  } else if (profile.lang === 'english') {
+    parts.push('🔤 Language: Talk to him in clear, friendly English with Egyptian warmth.');
+  } else if (profile.lang === 'franco') {
+    parts.push('🔤 لغة التخاطب: رد عليه بالفرانكو العربي (Franco-Arabic).');
+  }
+
   for (const layer of pickLayers({ text, profile, analysis, mode })) parts.push(layer);
 
   // 🧠 الذاكرة (الاسم، المعلومات، الإحساس السابق، آخر 8 رسايل)

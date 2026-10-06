@@ -21,6 +21,9 @@ const expected = {
   سباق: 'race',
   سرعه: 'ping',
   الهكزة: 'hookah',
+  فكر: 'فكر',
+  ذاكرتي: 'ذاكرتي',
+  لغتي: 'لغتي',
 };
 for (const [alias, winner] of Object.entries(expected)) {
   check(`.${alias} → ${winner}`, commands.get(alias)?.name === winner, `الفعلي=${commands.get(alias)?.name}`);

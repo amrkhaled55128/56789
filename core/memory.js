@@ -228,6 +228,32 @@ export function chillTick(key) {
   }
 }
 
+// 🗑️ حذف ذكرى محددة بالرقم
+export function deleteMemory(key, index) {
+  const p = getProfile(key);
+  if (!p.memories || index < 0 || index >= p.memories.length) return null;
+  const removed = p.memories.splice(index, 1)[0];
+  saveProfile(key, p);
+  return removed;
+}
+
+// 🧹 تصفير كل الذكريات للمستخدم
+export function clearMemories(key) {
+  const p = getProfile(key);
+  const count = p.memories?.length ?? 0;
+  p.memories = [];
+  saveProfile(key, p);
+  return count;
+}
+
+// 🔤 حفظ تفضيل اللغة (مصري / فصحى / إنجليزي / فرانكو)
+export function setLanguage(key, lang) {
+  const p = getProfile(key);
+  p.lang = lang;
+  saveProfile(key, p);
+  return lang;
+}
+
 // اسم الشخص لا يُنسى: الأولوية للأصدقاء (بأي صيغة هوية)، ثم "اسمي فلان"، ثم pushName
 export function ensureName(key, profile, pushName, sender, senderAlt) {
   // 💚 الأصدقاء المقربين — اسمهم ثابت من config (بأي صيغة هوية: رقم أو LID)
