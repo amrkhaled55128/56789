@@ -24,6 +24,10 @@ const expected = {
   فكر: 'فكر',
   ذاكرتي: 'ذاكرتي',
   لغتي: 'لغتي',
+  سبوتيفاي: 'spotify',
+  بحث_تيك: 'ttsearch',
+  ميديافاير: 'mediafire',
+  كود: 'run',
 };
 for (const [alias, winner] of Object.entries(expected)) {
   check(`.${alias} → ${winner}`, commands.get(alias)?.name === winner, `الفعلي=${commands.get(alias)?.name}`);

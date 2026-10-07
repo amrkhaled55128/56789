@@ -1,10 +1,8 @@
 import { sendQuickReplies, sendText, sendImage } from '../../core/send.js';
-import axios from 'axios';
+import api from '../../core/api.js';
 import { db } from '../../core/db.js';
 
 // 📌 .pin — صور بينترست بالبحث + أزرار اختيار
-const BASE = 'https://engez.a7a.online';
-
 function cache() {
   return db.get('searchCache', {});
 }
@@ -22,7 +20,7 @@ export default {
       const c = cache()[m.jid];
       const r = c?.type === 'pin' ? c.results?.[Number(pick[1])] : null;
       if (!r) return m.reply('⌛ النتايج قديمة — ابحث تاني: `.pin كلمة`');
-      return sendImage(sock, m.jid, r.image, `📌 ${r.title ?? ''}`);
+      return sendImage(sock, m.jid, r.image ?? r.url, `📌 ${r.title ?? ''}`);
     }
 
     if (!text) {
@@ -37,8 +35,12 @@ export default {
     }
 
     await sendText(sock, m.jid, `📌 بدور على: *${text}*...`);
-    const { data } = await axios.get(`${BASE}/api/v1/search/pinimg`, { params: { q: text, limit: 6 }, timeout: 30000 });
-    const results = (data?.results ?? []).filter((r) => r.image);
+    let results = [];
+    try {
+      results = await api.pinimg(text, 6);
+    } catch (err) {
+      return m.reply('😵 تعذر جلب صور بينترست حالياً، حاول مجدداً لاحقاً.');
+    }
     if (!results.length) return m.reply('😕 ملقيتش صور — جرب كلمات تانية');
 
     const all = cache();

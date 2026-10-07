@@ -98,6 +98,38 @@ async function get(path, params = {}, timeout = 30000) {
   }
 }
 
+async function post(path, body = {}, timeout = 30000) {
+  const b = breakerOf(path);
+
+  if (Date.now() < b.openUntil) {
+    throw new Error('الـ API في وضع آمن مؤقت — استنى شوية');
+  }
+
+  try {
+    const { data } = await http.post(path, body, { timeout });
+    const result = unwrap(data, path);
+    if (b.notified) notifyOwner(`🟢 الـ API رجع يشتغل: ${path}`);
+    b.notified = false;
+    b.state = 'ok';
+    b.fails = 0;
+    publishStatus();
+    return result;
+  } catch (err) {
+    b.state = 'degraded';
+    b.fails++;
+    if (b.fails >= FAIL_LIMIT && Date.now() >= b.openUntil) {
+      b.openUntil = Date.now() + OPEN_MS;
+      b.state = 'open';
+      b.fails = 0;
+      b.notified = true;
+      console.error(`🔴 ${path} دخل وضع آمن ${OPEN_MS / 1000} ثانية (فشل متكرر)`);
+      notifyOwner(`🔴 تنبيه: ${path} فشل ${FAIL_LIMIT} مرات — وضع آمن ${OPEN_MS / 1000} ثانية`);
+    }
+    publishStatus();
+    throw err;
+  }
+}
+
 // حالة الـ API كلها (للسجل والداشبورد)
 export function apiHealth() {
   const now = Date.now();
@@ -329,6 +361,42 @@ export const api = {
   async removeBg(imageUrl) {
     const d = await get('/api/v1/tools/removebg', { action: 'ازالة', imageUrl }, 120000);
     return d.response?.url ?? null;
+  },
+
+  // 🎵 سبوتيفاي — بحث رسمي بالأغاني والتراكات
+  async spotifySearch(q, limit = 10) {
+    const d = await get('/api/v1/search/spotify', { q, limit });
+    return d.response?.results ?? [];
+  },
+
+  // 📱 تيك توك — بحث بالمحتوى والفيديوهات
+  async tiktokSearch(query) {
+    const d = await get('/api/v1/search/tiktok', { query });
+    return d.response?.results ?? d.results ?? [];
+  },
+
+  // 📌 بينترست — بحث صور
+  async pinimg(q, limit = 6) {
+    const d = await get('/api/v1/search/pinimg', { q, limit });
+    return (d.results ?? []).filter((r) => r?.image || r?.url);
+  },
+
+  // 📦 ميديا فاير — فك وتحميل الروابط
+  async mediafire(url) {
+    const d = await get('/api/v1/download/mediafire', { url }, 60000);
+    return d.response ?? d.data ?? null;
+  },
+
+  // 👥 فيسبوك — تحميل احتياطي
+  async fbDownload(url) {
+    const d = await get('/api/v1/download/facebook', { url }, 60000);
+    return d.response ?? d.data ?? null;
+  },
+
+  // 💻 تشغيل كود — Remote Code Runner
+  async executeCode(code) {
+    const d = await post('/api/__v0/_execute', { code }, 30000);
+    return d.result ?? d;
   },
 };
 

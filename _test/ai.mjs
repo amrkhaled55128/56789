@@ -62,6 +62,14 @@ check('حذف ذكرى بالرقم', del.text === 'بيحب الكشري بال
 setLanguage(testKey, 'msa');
 check('تحديد لغة البروفايل (msa)', getProfile(testKey).lang === 'msa');
 
+console.log('\n🌐 واجهات API الجديدة والمكتشفة');
+const { api } = await import('../core/api.js');
+check('api.spotifySearch معرّفة كدالة', typeof api.spotifySearch === 'function');
+check('api.tiktokSearch معرّفة كدالة', typeof api.tiktokSearch === 'function');
+check('api.pinimg معرّفة كدالة', typeof api.pinimg === 'function');
+check('api.mediafire معرّفة كدالة', typeof api.mediafire === 'function');
+check('api.executeCode معرّفة كدالة', typeof api.executeCode === 'function');
+
 console.log(`\n✅ ${pass} | ❌ ${fail}`);
 process.exit(fail ? 1 : 0);
 
