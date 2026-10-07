@@ -54,69 +54,81 @@ const PAGE = `<!DOCTYPE html>
   .row { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #2a3942; font-size:14px; }
   .row:last-child { border-bottom:none; }
   .ok { color:#00a884; } .bad { color:#f15c6d; }
-  img { background:#fff; border-radius:16px; padding:12px; display:block; margin:10px auto; }
-  #qrbox { text-align:center; display:none; }
+  img { background:#fff; border-radius:16px; padding:12px; display:block; margin:10px auto; min-width:260px; min-height:260px; }
+  #qrbox { text-align:center; }
+  #status { font-weight:600; color:#00a884; margin:8px 0; }
   small { color:#8696a0; }
 </style>
 </head>
 <body>
 <h1>⚡ NOVA DASHBOARD</h1>
-<div class="grid" id="cards"></div>
-<div class="wide"><h3>👥 الناس اللي في ذاكرة استرو</h3><div id="people"></div></div>
-<div class="wide"><h3>💬 الجروبات</h3><div id="groups"></div></div>
-<div class="wide"><h3>🧾 آخر الأوامر</h3><div id="lastcmds"></div></div>
-<div class="wide" id="qrbox"><h3>📲 ربط جهاز جديد</h3>
-  <img id="qr" alt="QR">
-  <div id="status"></div>
-  <small>افتح واتساب → الأجهزة المرتبطة → ربط جهاز — وامسح من الكمبيوتر</small>
+<div class="wide" id="qrbox">
+  <h3>📲 ربط جهاز جديد بالواتساب</h3>
+  <img id="qr" src="/qr.png" alt="كود QR">
+  <div id="status">⏳ جارٍ تجهيز كود الربط...</div>
+  <small>افتح واتساب على هاتفك → الأجهزة المرتبطة → ربط جهاز — وامسح الكود</small>
 </div>
-<small style="display:block;text-align:center;margin-top:16px">البيانات بتتجدد تلقائيًا كل 5 ثواني • الصفحة دي محلية على جهازك بس</small>
+<div class="grid" id="cards">
+  <div class="card"><div class="num" id="c-status">🟡 جارٍ الفحص</div><div class="lbl">حالة البوت</div></div>
+  <div class="card"><div class="num" id="c-uptime">0 ثانية</div><div class="lbl">مدة التشغيل</div></div>
+  <div class="card"><div class="num" id="c-msgs">0</div><div class="lbl">الرسايل</div></div>
+  <div class="card"><div class="num" id="c-cmds">0</div><div class="lbl">الأوامر</div></div>
+  <div class="card"><div class="num" id="c-api">🟢 شغال</div><div class="lbl">حالة API</div></div>
+  <div class="card"><div class="num" id="c-mem">0</div><div class="lbl">في الذاكرة</div></div>
+</div>
+<div class="wide"><h3>👥 الناس اللي في ذاكرة استرو</h3><div id="people"><div class="row">جارٍ التحميل...</div></div></div>
+<div class="wide"><h3>💬 الجروبات</h3><div id="groups"><div class="row">جارٍ التحميل...</div></div></div>
+<div class="wide"><h3>🧾 آخر الأوامر</h3><div id="lastcmds"><div class="row">لسه مفيش أوامر</div></div></div>
+<small style="display:block;text-align:center;margin-top:16px">البيانات بتتجدد تلقائيًا كل 3 ثواني • لوحة تحكم سريعة</small>
 <script>
 const TOKEN = new URLSearchParams(location.search).get('token') ?? '';
-// 🔒 escape HTML — الأسماء والجروبات جايين من واتساب (أي حد يقدر يسمّي نفسه
-// "<img onerror=...>") فمنحقنهمش خام في innerHTML
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const fmtUptime = (ms) => { const s = Math.floor(ms/1000); const h = Math.floor(s/3600), m = Math.floor(s%3600/60); return h ? h + ' ساعة ' + m + ' دقيقة' : m + ' دقيقة ' + (s%60) + ' ثانية'; };
+
+const qrImg = document.getElementById('qr');
+qrImg.onerror = () => {
+  document.getElementById('status').textContent = '⏳ جاري توليد كود الـ QR...';
+};
+qrImg.onload = () => {
+  document.getElementById('status').textContent = '📲 امسح الكود الآن لربط الواتساب';
+};
+
 async function tick() {
   try {
-    const r = await fetch('/stats?token=' + TOKEN);
+    const r = await fetch('/stats?token=' + TOKEN, { signal: AbortSignal.timeout(2500) });
     const d = await r.json();
-    document.getElementById('cards').innerHTML = [
-      ['حالة البوت', d.connected ? '🟢 متصل' : '🟡 مستني المسح'],
-      ['مدة التشغيل', fmtUptime(d.uptime)],
-      ['الرسايل', d.messages],
-      ['الأوامر', d.commands],
-      ['ردود الذكاء', d.aiReplies],
-      ['صوتيات', d.voices],
-      ['ملصقات', d.stickers],
-      ['تحميلات', d.downloads],
-      ['حالة API', d.apiStatus === 'ok' ? '🟢 شغال' : '🔴 وضع آمن'],
-      ['في الذاكرة', (d.people ?? []).length + ' شخص'],
-    ].map(([l, n]) => '<div class="card"><div class="num">' + n + '</div><div class="lbl">' + l + '</div></div>').join('');
+
+    document.getElementById('c-status').textContent = d.connected ? '🟢 متصل' : '🟡 بانتظار المسح';
+    document.getElementById('c-uptime').textContent = fmtUptime(d.uptime || 0);
+    document.getElementById('c-msgs').textContent = d.messages || 0;
+    document.getElementById('c-cmds').textContent = d.commands || 0;
+    document.getElementById('c-api').textContent = d.apiStatus === 'ok' ? '🟢 شغال' : '🔴 وضع آمن';
+    document.getElementById('c-mem').textContent = (d.people ?? []).length + ' شخص';
 
     document.getElementById('people').innerHTML = (d.people ?? []).map(p =>
       '<div class="row"><span>' + esc(p.name) + '</span><span>💭 ' + p.memories + ' ذكرى • قبل ' + p.ago + '</span></div>'
-    ).join('') || '<div class="row">لسه مفيش أحد</div>';
+    ).join('') || '<div class="row">لسه مفيش أحد في الذاكرة</div>';
 
     document.getElementById('groups').innerHTML = (d.groups ?? []).map(g =>
       '<div class="row"><span>' + esc(g.subject) + '</span><span>' + g.size + ' عضو</span></div>'
-    ).join('') || '<div class="row">البوت مش في جروبات</div>';
+    ).join('') || '<div class="row">البوت مش متصل بجروبات حالياً</div>';
 
     document.getElementById('lastcmds').innerHTML = (d.lastCommands ?? []).map(c =>
       '<div class="row"><span>' + esc(c) + '</span></div>'
-    ).join('') || '<div class="row">لسه مفيش أوامر</div>';
+    ).join('') || '<div class="row">لسه مفيش أوامر متسجلة</div>';
 
     const qrbox = document.getElementById('qrbox');
     if (!d.connected) {
       qrbox.style.display = 'block';
-      document.getElementById('qr').src = '/qr.png?t=' + Date.now() + '&token=' + TOKEN;
-      document.getElementById('status').textContent = '⏳ بانتظار المسح — الكود بيتجدد لوحده';
+      qrImg.src = '/qr.png?t=' + Date.now();
     } else {
       qrbox.style.display = 'none';
     }
-  } catch {}
+  } catch (err) {
+    console.warn('Dashboard fetch retry:', err.message);
+  }
 }
-setInterval(tick, 5000);
+setInterval(tick, 3000);
 tick();
 </script>
 </body>

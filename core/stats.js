@@ -84,6 +84,11 @@ export function snapshot() {
 }
 
 export async function fullSnapshot() {
-  const groups = groupsProvider ? await groupsProvider().catch(() => []) : [];
+  const groups = groupsProvider
+    ? await Promise.race([
+        groupsProvider().catch(() => []),
+        new Promise((res) => setTimeout(() => res([]), 500)),
+      ])
+    : [];
   return { ...snapshot(), groups };
 }

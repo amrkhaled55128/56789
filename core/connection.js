@@ -113,10 +113,24 @@ export async function startBot() {
     clearCanonicalCache(); // 🆔 خريطة الهويات اتحدثت — الكاش القديم ميصلحش
   });
 
-  // 📊 الداشبورد: قايمة الجروبات الحية
+  // 📊 الداشبورد: قايمة الجروبات الحية (مع كاش وحماية من التعليق)
+  let cachedGroups = [];
+  let lastGroupFetch = 0;
   setGroupsProvider(async () => {
-    const groups = await sock.groupFetchAllParticipating().catch(() => ({}));
-    return Object.values(groups).map((g) => ({ subject: g.subject, size: g.participants?.length ?? 0 }));
+    if (!sock?.user) return [];
+    const now = Date.now();
+    if (now - lastGroupFetch < 60000 && cachedGroups.length) return cachedGroups;
+    try {
+      const groups = await Promise.race([
+        sock.groupFetchAllParticipating(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 1500)),
+      ]);
+      cachedGroups = Object.values(groups || {}).map((g) => ({ subject: g.subject, size: g.participants?.length ?? 0 }));
+      lastGroupFetch = now;
+      return cachedGroups;
+    } catch {
+      return cachedGroups;
+    }
   });
 
   // 📣 المجدول: تذكيرات + صباح الخير + التحدي اليومي + متابعة الغايبين + صدارة الجمعة
