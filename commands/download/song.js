@@ -82,7 +82,12 @@ export default {
           caption,
         });
       }
-      return sock.sendMessage(m.jid, { video: buffer, mimetype: 'video/mp4', caption });
+      return sock.sendMessage(m.jid, {
+        video: buffer,
+        mimetype: 'video/mp4',
+        fileName: `${(r.title ?? 'video').slice(0, 40)}.mp4`,
+        caption,
+      });
     }
 
     if (!text) {

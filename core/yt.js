@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import youtubedl from 'youtube-dl-exec';
 import ffmpegPath from 'ffmpeg-static';
 import api from './api.js';
-import { fetchMedia } from './fetchmedia.js';
+import { fetchMedia, toMp4 } from './fetchmedia.js';
 
 // 📍 مسار المجلد — المسار فيه مسافة ("New folder") فبنستخدم fileURLToPath
 // بدل import.meta.url مباشرة (التاني بيسيب %20 في المسار)
@@ -152,13 +152,27 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
           '--no-check-certificate',
           '-o', path.join(dir, 'media.%(ext)s'),
         ];
+        let fDir = null;
         if (ffmpegPath) {
-          args.push('--ffmpeg-location', path.dirname(ffmpegPath));
+          try {
+            if (await fs.access(ffmpegPath).then(() => true).catch(() => false)) {
+              fDir = path.dirname(ffmpegPath);
+            }
+          } catch {}
+        }
+        if (fDir) {
+          args.push('--ffmpeg-location', fDir);
         }
         if (kind === 'audio') {
           args.push('-x', '--audio-format', 'mp3', '--audio-quality', '128K', '-f', 'bestaudio/ba/b');
         } else {
-          args.push('-f', `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]/b[height<=${height}]/bv*+ba/b`);
+          // 🎬 واتساب موبايل بيشترط كوديك H.264 AVC1 وصوت AAC مع yuv420p لتشغيل الفيديو
+          args.push(
+            '-f', `bv*[vcodec^=avc][height<=${height}]+ba[acodec^=mp4a]/bv*[vcodec^=avc]+ba/b[vcodec^=avc][height<=${height}]/bv*[height<=${height}]+ba/b`,
+            '--merge-output-format', 'mp4',
+            '--recode-video', 'mp4',
+            '--postprocessor-args', 'ffmpeg_video:-pix_fmt yuv420p -movflags +faststart'
+          );
         }
         args.push(url);
 
@@ -166,7 +180,11 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
         const files = await fs.readdir(dir);
         const found = files.find((f) => !f.endsWith('.part'));
         if (!found) throw new Error(`yt-dlp ماخلّيش ملف: ${String(stderr).slice(-120)}`);
-        return await fs.readFile(path.join(dir, found));
+        const rawBuf = await fs.readFile(path.join(dir, found));
+        if (kind === 'video' && !found.endsWith('.mp4')) {
+          return await toMp4(rawBuf, { height }).catch(() => rawBuf);
+        }
+        return rawBuf;
       });
     } catch (err) {
       console.error('⚠️ yt-dlp فشل:', String(err.stderr ?? err.message).slice(0, 100));

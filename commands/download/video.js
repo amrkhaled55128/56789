@@ -77,6 +77,7 @@ export default {
         return await sock.sendMessage(m.jid, {
           video: buffer,
           mimetype: 'video/mp4',
+          fileName: `${(r.title ?? 'video').slice(0, 40)}.mp4`,
           caption: `🎬 ${r.title ?? ''}`,
         });
       } catch {

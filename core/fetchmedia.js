@@ -130,15 +130,27 @@ export async function fetchMedia(url, { expect = null, headers = {}, timeout = 4
   throw new Error('تحويلات كتير أوي — اللينك مش صالح');
 }
 
+import nodeFs from 'node:fs';
+
 // 🔊 تحويل أي صوت لـ OGG/Opus (وده اللي WhatsApp بطلبه للـ voice note)
+function getFfmpeg() {
+  if (ffmpegPath) {
+    try {
+      if (nodeFs.existsSync(ffmpegPath)) return ffmpegPath;
+    } catch {}
+  }
+  return 'ffmpeg';
+}
+
 function requireFfmpeg() {
-  if (!ffmpegPath) throw new Error('ffmpeg غير موجود على الخادم');
+  const bin = getFfmpeg();
+  if (!bin) throw new Error('ffmpeg غير موجود على الخادم');
 }
 
 export function toOggOpus(buffer, { bitrate = '64k', sampleRate = '48000' } = {}) {
   requireFfmpeg();
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpegPath, [
+    const p = spawn(getFfmpeg(), [
       '-hide_banner', '-loglevel', 'error',
       '-i', 'pipe:0',
       '-c:a', 'libopus', '-b:a', bitrate, '-ar', sampleRate, '-ac', '1',
@@ -161,15 +173,15 @@ export function toOggOpus(buffer, { bitrate = '64k', sampleRate = '48000' } = {}
   });
 }
 
-// 🎬 تحويل أي فيديو لـ MP4 (Whatsاب مش بيقبل غير ده كـ video)
+// 🎬 تحويل أي فيديو لـ MP4 (واتساب بيشترط H.264 و yuv420p و AAC و faststart)
 export function toMp4(buffer, { height = 720 } = {}) {
   requireFfmpeg();
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpegPath, [
+    const p = spawn(getFfmpeg(), [
       '-hide_banner', '-loglevel', 'error',
       '-i', 'pipe:0',
-      '-vf', `scale=-2:min(${height},ih)`,
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-vf', `scale=trunc(iw/2)*2:trunc(ih/2)*2,scale=-2:min(${height},ih)`,
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-preset', 'veryfast', '-crf', '28',
       '-c:a', 'aac', '-b:a', '128k',
       '-movflags', '+faststart',
       '-f', 'mp4', 'pipe:1',
@@ -193,7 +205,7 @@ export function toMp4(buffer, { height = 720 } = {}) {
 export function toJpeg(buffer) {
   requireFfmpeg();
   return new Promise((resolve, reject) => {
-    const p = spawn(ffmpegPath, [
+    const p = spawn(getFfmpeg(), [
       '-hide_banner', '-loglevel', 'error',
       '-i', 'pipe:0',
       '-vf', "scale='min(1280,iw)':-2",
