@@ -23,34 +23,34 @@ import { setGroupsProvider, setApiStatus, setConnected } from './stats.js';
 import { db } from './db.js';
 import { QR_FILE } from './qr-server.js';
 import api, { setOwnerNotifier, onApiStatus } from './api.js';
+import {
+  restoreSessionFromDb,
+  scheduleSessionSync,
+  syncSessionToDb,
+  clearSessionFromDb,
+} from './postgres.js';
 
 const logger = pino({ level: 'silent' });
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// ☁️ على Railway: التخزين كله جوّه الـ volume الواحد /app/session
 const SESSION_DIR = join(__dirname, '..', 'session');
-// ملف الـ QR: نفس المسار اللي سيرفر الداشبورد بيقرا منه (مُعرَّف هناك مرة واحدة)
 
-// 🔄 حالة إعادة الاتصال — backoff + منع تداخل المحاولات
 let reconnecting = false;
 let reconnectAttempts = 0;
-// 🔁 عداد إقلاعات ما بعد الـ logout — حماية من لوب لا نهائي لو الجلسة بتتسجل
-// خروج ورا بعض. بيتصفر أول ما الاتصال ينجح.
 let logoutRestarts = 0;
-// دوال الإيقاف عشان ما نعملش intervals مكرّرة على كل reconnect
 let stopScheduler = null;
 let stopMaint = null;
 let stopSweep = null;
 
-// صفحة الويب بتقرا الكود من الملف ده عشان تعرض أحدث QR دايمًا
 function saveQr(qr) {
   fs.mkdirSync(dirname(QR_FILE), { recursive: true });
   fs.writeFileSync(QR_FILE, qr);
 }
 
 export async function startBot() {
+  await restoreSessionFromDb(SESSION_DIR);
+
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
-  // 🧠 ترحيل الذاكرة القديمة للهويات الجديدة (مرة واحدة)
   migrateOldData();
 
   let version;
@@ -87,11 +87,13 @@ export async function startBot() {
     syncFullHistory: false,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    scheduleSessionSync(SESSION_DIR, 2000);
+  });
   sock.ev.on('connection.update', (update) => onConnectionUpdate(sock, update));
   sock.ev.on('messages.upsert', (upsert) => handleUpsert(sock, { commands, categories }, upsert));
 
-  // 🆔 هوية البوت نفسه — عشان متتخلطش بذاكرة الناس + 🧹 الصيانة الدورية
   setBotIdentity(sock);
   stopMaint?.();
   stopMaint = startMaintenance();
@@ -99,10 +101,8 @@ export async function startBot() {
   stopSweep?.();
   stopSweep = startProtectionSweep();
 
-  // 📊 حالة الـ API على الداشبورد — كان بيقول "شغال" دايمًا
   onApiStatus((status, openCount) => setApiStatus(status, openCount));
 
-  // 🔄 مزامنة LID ← رقم التليفون تلقائيًا (التعرف بيشتغل مع أي شخص جديد)
   sock.ev.on('lid-mapping.update', ({ lid, pn }) => {
     if (!lid || !pn) return;
     const aliases = db.get('identities', {});
@@ -110,10 +110,9 @@ export async function startBot() {
     const target = aliases[String(lid)];
     aliases[target] = target;
     db.set('identities', aliases);
-    clearCanonicalCache(); // 🆔 خريطة الهويات اتحدثت — الكاش القديم ميصلحش
+    clearCanonicalCache();
   });
 
-  // 📊 الداشبورد: قايمة الجروبات الحية (مع كاش وحماية من التعليق)
   let cachedGroups = [];
   let lastGroupFetch = 0;
   setGroupsProvider(async () => {
@@ -133,17 +132,11 @@ export async function startBot() {
     }
   });
 
-  // 📣 المجدول: تذكيرات + صباح الخير + التحدي اليومي + متابعة الغايبين + صدارة الجمعة
-  // ⛔ بنوقف المجدول القديم الأول — من غير كده كل إعادة اتصال بتسيب
-  // interval شغّال جديد وبيشتغلوا كلهم على نفس الـ DB
   stopScheduler?.();
   stopScheduler = startScheduler(sock);
 
-  // 🚨 كشف Raid: دخلوا 5+ أعضاء في دقيقة → قفل تلقائي للجروب + تنبيه المالك
   const raidMap = new Map();
   sock.ev.on('group-participants.update', async (event) => {
-    // ⚠️ كان بيفكك الـ event في برميتار الدالة من غير try/catch — أي error هنا
-    // كان unhandled rejection. كمان بيموت أول ما participants تبقى مش array.
     try {
       const { id, participants, action } = event ?? {};
       if (action !== 'add' || !Array.isArray(participants) || !participants.length) return;
@@ -153,7 +146,7 @@ export async function startBot() {
       raidMap.set(id, joins);
       if (joins.length >= 5) {
         raidMap.set(id, []);
-        await sock.groupSettingUpdate(id, 'announcement'); // قفل الجروب (أدمن بس يكتب)
+        await sock.groupSettingUpdate(id, 'announcement');
         await sock.sendMessage(id, { text: '🚨 اتحشر ضغط دخول! الجروب اتقفل مؤقتًا لحمايته — الأدمن يفتحه من إعدادات واتساب' });
         const ownerNum = config.owners?.[0];
         if (ownerNum) {
@@ -167,7 +160,6 @@ export async function startBot() {
     }
   });
 
-  // 🔔 تنبيه المالك بأخطاء الـ API الحرجة (لو رقمه متسجل)
   const ownerNum = config.owners?.[0];
   if (ownerNum) {
     const ownerJid = `${String(ownerNum).replace(/\D/g, '')}@s.whatsapp.net`;
@@ -176,7 +168,6 @@ export async function startBot() {
     });
   }
 
-  // 👋 الترحيب/الوداع + إزالة المحظور عند دخوله مجددًا
   sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
     try {
       if (!Array.isArray(participants) || !participants.length) return;
@@ -221,7 +212,6 @@ export async function startBot() {
 }
 
 function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
-  // 🔢 ربط بكود الهاتف (لو مفعّل في الإعدادات)
   if (qr && config.pairingPhone && !sock.authState?.creds?.registered) {
     const phone = String(config.pairingPhone).replace(/\D/g, '');
     sock.requestPairingCode(phone)
@@ -234,7 +224,6 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
     return;
   }
 
-  // 📷 ربط برمز QR
   if (qr) {
     saveQr(qr);
     console.log('\n📲 افتح واتساب → الأجهزة المرتبطة → ربط جهاز، وامسح الكود ده:\n');
@@ -245,10 +234,11 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
     saveQr('');
     setConnected(true);
     resetReconnectBackoff();
-    logoutRestarts = 0; // اتصلّنا بنجاح — عداد الـ logout يبدأ من جديد
+    logoutRestarts = 0;
     const number = sock.user?.id?.split(':')[0] ?? '';
     console.log(`\n✅ ${config.botName} ${config.botEmoji} شغال! (مرتبط بـ ${number})`);
     console.log(`🧩 البادئة: ${config.prefix} — جرّب اكتب ${config.prefix}menu في أي شات\n`);
+    syncSessionToDb(SESSION_DIR).catch(() => {});
   }
 
   if (connection === 'close') {
@@ -256,13 +246,8 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
     const code = lastDisconnect?.error?.output?.statusCode;
     if (code === DisconnectReason.loggedOut) {
       console.log('❌ الجلسة اتسجلت خروج — بنمسح بيانات المصادقة وبنولّد QR جديد');
-      // ⚠️ كان بيمسح SESSION_DIR كله — وده على Railway فيه data/db.json
-      // (لأن DATA_DIR = session/data) يعني كل ذاكرة الناس والاقتصاد
-      // والتذكيرات اتمسحت مع ملفات الدخول. دلوقتي بنمسح المصادقة بس.
       clearAuthFiles();
-      // ⛔ قبلكان كنا بنعمل return وخلاص — البوت بيفضل ميت من غير QR جديد
-      // لحد ريستارت يدوي والداشبورد يقول «متصل»! بنشغّل البوت تاني عشان
-      // يتولد QR، مع عداد حماية من اللوب اللانهائي.
+      clearSessionFromDb().catch(() => {});
       logoutRestarts++;
       if (logoutRestarts <= 5) {
         setTimeout(() => {
@@ -274,19 +259,14 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
       return;
     }
 
-    // ⛔ إعادة اتصال واحدة بس في نفس الوقت
     if (reconnecting) {
       console.log('⏳ في إعادة اتصال جارية بالفعل — مستني');
       return;
     }
     reconnecting = true;
 
-    // 📈 backoff: 3ث → 6ث → 12ث → 30ث (الحد الأقصى). قبل كده كان بيحاول
-    // كل 3 ثواني للأبد لو الشبكة تعبانة = إعادة تحميل كل الأوامر + intervals
-    // جديدة في كل مرة.
     const delay = Math.min(30000, 3000 * 2 ** Math.min(reconnectAttempts, 4));
     reconnectAttempts++;
-    // 🧾 لوج واحد منظم: رقم المحاولة + الكود + سبب مفهوم + مدة الانتظار
     const reason = DISCONNECT_REASONS[code] ?? 'سبب غير معروف';
     console.log(`🔄 قطع اتصال #${reconnectAttempts} (كود ${code} — ${reason}) — إعادة المحاولة بعد ${delay / 1000} ثانية...`);
 
@@ -300,7 +280,6 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
   }
 }
 
-// أسماء مفهومة لأكواد قطع الاتصال — عشان اللوج يقول السبب مش رقم غامض
 const DISCONNECT_REASONS = {
   [DisconnectReason.connectionClosed]: 'الاتصال اتقفل',
   [DisconnectReason.connectionLost]: 'الاتصال ضاع',
@@ -310,17 +289,14 @@ const DISCONNECT_REASONS = {
   [DisconnectReason.multilogin]: 'تسجيل دخول متعدد',
 };
 
-// 🧹 مسح ملفات المصادقة فقط — سيب مجلد data (الذاكرة/الاقتصاد) زي ما هو
 function clearAuthFiles() {
   try {
     if (!fs.existsSync(SESSION_DIR)) return;
     for (const name of fs.readdirSync(SESSION_DIR)) {
-      // ملفات المصادقة بس: creds + مفاتيح الإشارات
       if (name === 'creds.json' || name === 'creds.json.bak' || name.startsWith('app-state')) {
         fs.rmSync(join(SESSION_DIR, name), { force: true });
       }
     }
-    // ملفات الـ lid/device-list موجودة في مجلد فرعي جوه session
     for (const sub of ['lid-mapping', 'device-list', 'pre-key']) {
       const dir = join(SESSION_DIR, sub);
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
@@ -330,10 +306,6 @@ function clearAuthFiles() {
   }
 }
 
-// ✅ نجح الاتصال → نصفّر عداد المحاولات. قبل كده الشرط كان `if (reconnecting)`
-// وده عمره ما بيتحقق: 'open' بيوصّل بعد ما finally بتاع startBot يكون خلص
-// وخمّد reconnecting = false — فالعداد كان بيكبر للأبد، وقطع بسيط متفرق بعد
-// يوم شغل بياخد 30 ثانية انتظار بدل 3 ثواني.
 function resetReconnectBackoff() {
   reconnectAttempts = 0;
 }
