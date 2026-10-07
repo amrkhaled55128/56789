@@ -1,5 +1,6 @@
 import api from './api.js';
 import { chatWithAI, cleanForVoice, isErrorText } from './ai.js';
+import { dispatchToolAction } from './tool-caller.js';
 import { TRIGGERS } from './persona.js';
 import {
   rememberMessage,
@@ -222,6 +223,17 @@ export async function maybeAutoReply(sock, m) {
     } catch {}
   }
   const extra = [awayExtra, visionHint].filter(Boolean).join(' ');
+
+  // 🛠️ فحص وتنفيذ الأدوات الذكية التفاعلية (AI Tool Calling & Intent Orchestrator)
+  const handled = await dispatchToolAction(sock, m, text, profile);
+  if (handled) {
+    bump('commands');
+    bump('aiReplies');
+    awardXp(key, 5);
+    rememberMessage(key, 'bot', `[أداة منفذة: ${text.slice(0, 40)}]`);
+    chillTick(key);
+    return;
+  }
 
   // ⚡ كاش الردود المتشابهة — نفس السؤال في 10 دقايق = رد فوري (بدون صور)
   if (!hasImage && !wantsVoice && !isReturnee) {
