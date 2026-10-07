@@ -150,6 +150,9 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
           '--no-playlist',
           '--no-progress',
           '--no-check-certificate',
+          '--socket-timeout', '30',
+          '--extractor-args', 'youtube:player_client=android,web',
+          '--user-agent', 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
           '-o', path.join(dir, 'media.%(ext)s'),
         ];
         let fDir = null;
@@ -159,6 +162,14 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
               fDir = path.dirname(ffmpegPath);
             }
           } catch {}
+        }
+        if (!fDir) {
+          for (const p of ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']) {
+            if (await fs.access(p).then(() => true).catch(() => false)) {
+              fDir = path.dirname(p);
+              break;
+            }
+          }
         }
         if (fDir) {
           args.push('--ffmpeg-location', fDir);
@@ -181,6 +192,13 @@ export async function downloadYoutube(url, kind = 'audio', { height = 720, timeo
         const found = files.find((f) => !f.endsWith('.part'));
         if (!found) throw new Error(`yt-dlp ماخلّيش ملف: ${String(stderr).slice(-120)}`);
         const rawBuf = await fs.readFile(path.join(dir, found));
+        if (rawBuf.length < 500) {
+          throw new Error('الملف المحمّل تالف أو فارغ');
+        }
+        const sample = rawBuf.subarray(0, 100).toString('utf8');
+        if (/<!doctype|<html|<head|<body/i.test(sample)) {
+          throw new Error('الرابط أرجع صفحة ويب وليس ملف وسائط حقيقي');
+        }
         if (kind === 'video' && !found.endsWith('.mp4')) {
           return await toMp4(rawBuf, { height }).catch(() => rawBuf);
         }

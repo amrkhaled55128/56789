@@ -11,7 +11,7 @@ export default {
     if (rawTarget && rawTarget !== 'back' && rawTarget !== 'رجوع' && rawTarget !== 'رجوع_للرئيسيه') {
       return sectionMenu(sock, m.jid, rawTarget, ctx);
     }
-    return mainMenu(sock, m.jid);
+    return mainMenu(sock, m.jid, '', ctx);
   },
 };
 

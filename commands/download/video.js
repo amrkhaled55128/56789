@@ -65,23 +65,25 @@ export default {
       }
 
       try {
+        const caption = `${isAudio ? '🎵' : '🎬'} *${r.title ?? ''}*\n⚡ بواسطة *استرو بـوت*`;
         if (isAudio) {
           const ogg = await toOggOpus(buffer).catch(() => null);
           return await sock.sendMessage(m.jid, {
             audio: ogg ?? buffer,
             mimetype: ogg ? 'audio/ogg; codecs=opus' : 'audio/mpeg',
-            filename: 'audio.mp3',
-            caption: `🎵 ${r.title ?? ''}`,
-          });
+            fileName: `${(r.title ?? 'audio').slice(0, 40)}.mp3`,
+            caption,
+          }, { quoted: m.msg });
         }
         return await sock.sendMessage(m.jid, {
           video: buffer,
           mimetype: 'video/mp4',
           fileName: `${(r.title ?? 'video').slice(0, 40)}.mp4`,
-          caption: `🎬 ${r.title ?? ''}`,
-        });
-      } catch {
-        return m.reply('😵 الملف كبير أوي على واتساب — جرّب 360 أو الصوت 🎧');
+          caption,
+        }, { quoted: m.msg });
+      } catch (sendErr) {
+        console.error('❌ فشل إرسال الفيديو لواتساب:', sendErr.message);
+        return m.reply('😵 الملف كبير أوي على واتساب — جرّب جودة 360 أو الصيغة الصوتية 🎧');
       }
     }
 

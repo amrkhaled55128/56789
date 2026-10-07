@@ -64,30 +64,42 @@ export default {
           height: format === '720' ? 720 : 360,
         });
       } catch (err) {
-        console.error('❌ التحميل فشل:', err.message?.slice(0, 80));
-        return m.reply(
-          '😵 مقدرش أجيب الملف ده.\n' +
-            '💡 جرّب أغنية تانية، أو جرّب الصيغة الصوتية 🎧\n' +
-            'أحياناً يوتيوب بيحجب تحميل فيديو معيّن',
-        );
+        console.warn('⚠️ محاولة يوتيوب فشلت، جاري البحث عبر ساوندكلاود:', err.message?.slice(0, 80));
+        if (isAudio) {
+          try {
+            const sc = await api.vexSoundcloud(r.title).catch(() => []);
+            const scUrl = sc?.[0]?.url;
+            if (scUrl) {
+              buffer = await downloadYoutube(scUrl, 'audio');
+            }
+          } catch (scErr) {
+            console.warn('⚠️ محاولة ساوندكلاود البديلة فشلت:', scErr.message?.slice(0, 80));
+          }
+        }
+        if (!buffer) {
+          return m.reply(
+            '😵 مقدرش أجيب الملف ده من يوتيوب.\n' +
+              '💡 جرّب أغنية تانية، أو جرب البحث بكلمات أدق 🎧',
+          );
+        }
       }
 
-      const caption = `${isAudio ? '🎵' : '🎬'} ${r.title ?? ''}`;
+      const caption = `${isAudio ? '🎵' : '🎬'} *${r.title ?? ''}*\n⚡ بواسطة *استرو بـوت*`;
       if (isAudio) {
         const ogg = await toOggOpus(buffer).catch(() => null);
         return sock.sendMessage(m.jid, {
           audio: ogg ?? buffer,
           mimetype: ogg ? 'audio/ogg; codecs=opus' : 'audio/mpeg',
-          filename: `${(r.title ?? 'audio').slice(0, 40)}.mp3`,
+          fileName: `${(r.title ?? 'audio').slice(0, 40)}.mp3`,
           caption,
-        });
+        }, { quoted: m.msg });
       }
       return sock.sendMessage(m.jid, {
         video: buffer,
         mimetype: 'video/mp4',
         fileName: `${(r.title ?? 'video').slice(0, 40)}.mp4`,
         caption,
-      });
+      }, { quoted: m.msg });
     }
 
     if (!text) {

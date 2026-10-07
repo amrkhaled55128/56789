@@ -598,6 +598,12 @@ export const api = {
     const d = await vexGet('/api/search/soundcloud', { q, action });
     return d.results ?? d.data ?? [];
   },
+
+  // 🤖 جيميناي السريع فائق الاستجابة — VEX Gemini
+  async vexGemini(prompt) {
+    const d = await vexGet('/api/ai/gemini', { prompt }, 12000);
+    return d.reply ?? d.data?.reply ?? d.response ?? '';
+  },
 };
 
 export default api;

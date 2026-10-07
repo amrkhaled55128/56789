@@ -168,15 +168,7 @@ async function analyzeMessage(text) {
     const a = await groqAnalyze(text);
     if (a) return a;
   }
-  try {
-    const raw = await api.gpt(
-      `حلّل الرسالة دي وأجيب بـ JSON بس: {"mood":"زعلان|مبسوط|تعبان|قلقان|حبيت|عادي","intent":"فضفضة|سؤال|مزح|دعم|غزل|نصيحة|أمر","topic":"باختصار"}\nالرسالة: ${text.slice(0, 250)}`,
-    );
-    const json = raw.match(/\{[\s\S]*\}/)?.[0];
-    return json ? JSON.parse(json) : null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 // ✨ تنظيف الرد — بلا ما يمسح المعنى
@@ -286,34 +278,8 @@ export async function chatWithAI({
   const isInsult = isInsultText(text) && !contact;
   const roastInstruction = `${PERSONA_COMPACT}\n\n${INSULT_DEFENSE}\n\nالمهم دلوقتي: الرسالة دي إهانة ليك — رد عليه بقهر مصري حاد وسخرية في سطر واحد من غير سباب صريح.`;
 
-  // 1) GPT-5.6 Luna (engez) — أساسي إن كان endpoint متاحًا.
-  // إذا عاد 500 عدة مرات، يفتحه breaker ويُتخطّى مؤقتًا.
-  //
-  // ⚠️ الراوت دلوقتي بيرجّع 500 (المزوّد رجّع 404 جوه) = خدمة ميتة.
-  // كل رسالة كانت بتدفع 2-3 ثواني قبل ما توصل لـ Groq. دلوقتي بنسأل
-  // دائرة الأمان الأول ونتخطاه لو مقفول.
-  if (!isOpen('/api/v1/ai/gpt')) {
-    try {
-      const q = isInsult
-        ? `${roastInstruction.slice(0, 900)}\n\nرسالته: ${text.slice(0, 250)}`
-        : `${gptInstruction}${retryHint}\n\nرسالته: ${text.slice(0, 400)}`;
-      const reply = await api.gpt(q);
-      if (reply?.trim()) {
-        const clean = polishReply(reply, { allowLong });
-        if (!isErrorText(clean)) return { reply: clean, engine: 'gpt5.6' };
-      }
-    } catch (err) {
-      console.error('⚠️ GPT فشل:', err.message?.slice(0, 80));
-    }
-  }
-
-  // 2) ⚡ Groq qwen3.8-27b — بالشخصية الكاملة (احتياط قوي)
-  // الـ429 والtimeout لهم retry/backoff موحّد جوه groq.js نفسها —
-  // قبل كده كان الretry مكرر هنا وخد الغلبان: داخلي + خارجي = 3 نداءات
+  // 1) ⚡ Groq qwen3.8-27b — العقل فائق السرعة بالشخصية الكاملة (إذا وجد المفتاح)
   if (isGroqReady()) {
-    // 🚫 منع التكرار: نقارن بردود استرو الأخيرة فقط — الرد اللي يشبه كلام
-    // المستخدم نفسه مش تكرار. المقارنة دي كانت مقيّدة بـ variants اللي
-    // محدش بيبعته، فالمسار العادي كان يرجّع نفس الرد حرفيًا لنفس السؤال.
     const recentBots = (profile.lastMessages ?? []).filter((h) => h.role === 'bot').slice(-3);
     let first = null;
     try {
@@ -326,13 +292,10 @@ export async function chatWithAI({
       });
       if (reply) {
         first = polishReply(reply, { allowLong });
-        // 🚫 نص خطأ مزوّد عمره ما يرجّع كنجاح — GPT وGemini بيتفحصوا وده كان ناقص هنا:
-        // "لم أتمكن..." كان ينفع يرجّع من المسار ده ويتبعت ويخزن
         if (isErrorText(first)) throw new Error('Groq رجّع نص خطأ');
         if (!isRepetitive(first, recentBots)) return { reply: first, engine: 'groq' };
-        // الرد قريب من رد سابق → محاولة بنبرة مختلفة تمامًا
         const alt = await chatGroq({
-          system: fullInstruction + '\n⚠️ ردك السابق على نفس الكلام كان قريب من اللي هتقوله — جاوب بنبرة مختلفة تماماً وابدأ بكلمة تانية خالص.',
+          system: fullInstruction + '\n⚠️ ردك السابق كان مكرر — جاوب بنبرة مختلفة تماماً.',
           messages: [...convo, userMsg],
           maxTokens: 260,
           temperature: 1.0,
@@ -342,42 +305,43 @@ export async function chatWithAI({
           const altClean = polishReply(alt, { allowLong });
           if (!isErrorText(altClean)) return { reply: altClean, engine: 'groq' };
         }
-        // البديل فشل — الأول سليم (بس شبه قديمه) أفضل من ما نرمي الرسالة
         if (!isErrorText(first)) return { reply: first, engine: 'groq' };
       }
     } catch (err) {
-      console.error('⚠️ Groq فشل:', err.message?.slice(0, 80));
+      console.warn('⚠️ Groq فشل أو غير متاح، جاري التحويل للمزود التالي:', err.message?.slice(0, 80));
       if (first && !isErrorText(first)) return { reply: first, engine: 'groq' };
     }
   }
 
-  // 3) Gemini احتياط — بشخصية مضغوطة (الـ API بيرفض >1200)
-  //
-  // ⚠️ الـ endpoint دايماً بيرجّع success مع reply فاضي (خدمة شبه ميتة).
-  // الرد الفاضي كان بيمرّ كنجاح فالعدّاد مش بيتحرك، يعني كل رسالة بتدفع
-  // 1.5 ثانية مقابل محاولة مالهاش نتيجة. بنتخطاها لو في وضع آمن.
-  if (!isOpen('/api/v1/ai/gemini')) {
-    try {
-      const compact = isInsult ? roastInstruction : compactInstruction;
-      const { reply } = await api.gemini(text.slice(0, 500), { instruction: compact });
-      if (reply?.trim()) {
-        const clean = polishReply(reply, { allowLong });
-        if (!isErrorText(clean)) return { reply: clean, engine: 'gemini' };
-      }
-      noteEmpty('/api/v1/ai/gemini');
-    } catch (err) {
-      console.error('⚠️ Gemini فشل:', err.message?.slice(0, 80));
+  // 2) 💎 VEX Gemini — محرك فائق السرعة والاستقرار (مجاني وسريع 2-4 ثواني)
+  try {
+    const vexPrompt = `${compactInstruction}\n\n[رسالة المستخدم]: ${text}`;
+    const vexReply = await api.vexGemini(vexPrompt);
+    if (vexReply?.trim()) {
+      const clean = polishReply(vexReply, { allowLong });
+      if (!isErrorText(clean)) return { reply: clean, engine: 'gemini-vex' };
     }
+  } catch (err) {
+    console.warn('⚠️ VEX Gemini تعذر، جاري تجربة المحرك الاحتياطي:', err.message?.slice(0, 80));
   }
 
-  // 4) 🛟 آخر خط: رد من الشخصية نفسها بدون أي API
-  // قبل كده لو كل المزوّدات وقعت البوت كان بيقول "كل المصادر فشلت" —
-  // رد ميت وغامض. دلوقتي بيرد بكلام حقيقي (حسب المزاج) عشان المستخدم
-  // ميحسش إن البوت كسر خالص.
+  // 3) Engez ChatGPT / Copilot — احتياطي بمهلة قصيرة
+  try {
+    const q = isInsult
+      ? `${roastInstruction.slice(0, 900)}\n\nرسالته: ${text.slice(0, 250)}`
+      : `${gptInstruction}${retryHint}\n\nرسالته: ${text.slice(0, 400)}`;
+    const reply = await api.chatgpt(q);
+    if (reply?.trim()) {
+      const clean = polishReply(reply, { allowLong });
+      if (!isErrorText(clean)) return { reply: clean, engine: 'chatgpt' };
+    }
+  } catch (err) {
+    console.warn('⚠️ Engez ChatGPT فشل:', err.message?.slice(0, 80));
+  }
+
+  // 4) 🛟 خط الأمان: رد استرو الفوري بشخصيته المصرية الذكية (0 ملي ثانية)
   try {
     const sim = await api.simsimi(text.slice(0, 200)).catch(() => null);
-    // ⚠️ نص خطأ المزوّد مش رد — قبل الفحص ده كان بيرجّع كنجاح فيتخزن
-    // في الذاكرة ويتبعت للمستخدم (خصوصًا من chat.js اللي مفيهوش فحص)
     if (sim?.trim() && !isErrorText(sim)) return { reply: polishReply(sim, { allowLong }), engine: 'simsimi' };
   } catch {}
 
