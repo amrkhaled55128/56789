@@ -122,26 +122,30 @@ tick();
 </body>
 </html>`;
 
-// ⚠️ محليًا على 127.0.0.1 — وعلى السحابة محمي بكلمة سر (DASH_TOKEN)
+// ⚠️ استماع على 0.0.0.0 للسماح بالوصول عبر السحابة والبروكسي (Cranl / Railway / Docker)
 export function startQrServer(port = 3000) {
-  const isCloud = !!process.env.RAILWAY_ENVIRONMENT;
-  // 🔐 على السحابة مفيش وضع بدون حماية: لو DASH_TOKEN فاضي بنولّد توكن
-  // عشوائي ونطبعه في اللوج — السيرفر بيسمع على 0.0.0.0 وذاكرة الناس مش
-  // حاجة تتحط مفتوحة على النت.
+  const isCloud = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.CRANL || process.env.NODE_ENV === 'production' || !!process.env.PORT;
   let authToken = config.dashToken || '';
   if (!authToken && isCloud) {
     authToken = randomBytes(16).toString('hex');
-    console.log(`🔐 DASH_TOKEN مش متحدد — ولّدت توكن مؤقت للداشبورد:\n   ?token=${authToken}`);
+    console.log(`🔐 DASH_TOKEN مش متحدد — ولّدت توكن اختياري للداشبورد:\n   ?token=${authToken}`);
   }
 
   const server = http.createServer(async (req, res) => {
     try {
-      // 🔐 حماية بالتوكن (السحابة، أو لو المالك حدد توكن محليًا)
-      if (authToken) {
+      // 🩺 فحص الصحة للسحابة والكونتينر
+      if (req.url === '/health' || req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', bot: config.botName }));
+        return;
+      }
+
+      // 🔐 حماية الإحصائيات الحساسة بكلمة سر لو تم تحديد DASH_TOKEN
+      if (config.dashToken && req.url.startsWith('/stats')) {
         const url = new URL(req.url, 'http://x');
-        if (url.searchParams.get('token') !== authToken) {
-          res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end('<body style="background:#0b141a;color:#e9edef;font-family:sans-serif;text-align:center;padding-top:40vh">🔐 الداشبورد محمي — ضيف <code>?token=xxxx</code></body>');
+        if (url.searchParams.get('token') !== config.dashToken) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'unauthorized' }));
           return;
         }
       }
@@ -180,9 +184,6 @@ export function startQrServer(port = 3000) {
             ago: ago === null ? '—' : ago < 1 ? 'دقايق' : ago + ' ساعة',
           };
         });
-        // 🔗 حالة الاتصال الحقيقية من stats (setConnected مربوطة بـ connection.update)
-        // — ومطمنين من ملف الـ QR لو البوت لسه ماقالش حالته. قبلكان ملف QR فاضي
-        // كان معناه «متصل» حتى وهو متسجل خروج!
         const connected = typeof snap.connected === 'boolean' ? snap.connected : !readQr();
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ ...snap, people, connected }));
@@ -198,16 +199,13 @@ export function startQrServer(port = 3000) {
       res.end('error');
     }
   });
-  // ☁️ على Railway: بيسمع على كل الواجهات بالمنفذ بتاعهم
-  const host = isCloud ? '0.0.0.0' : '127.0.0.1';
+
+  const host = '0.0.0.0';
   server.on('error', (err) => {
-    // ⚠️ من غير handler: حدث 'error' من غير مستمع بيعمل throw → index.js كان
-    // بيبتلعه → البوت بيفضل شغّال بس مفيش HTTP listener، وRailway شايفه شغّال
-    // والسيرفر مش بيرد على حد.
     console.error('❌ سيرفر الداشبورد فشل:', err.message);
   });
   server.listen(port, host, () => {
-    console.log(`🌐 لوحة التحكم: http://localhost:${port}`);
+    console.log(`🌐 لوحة التحكم: http://0.0.0.0:${port}`);
   });
   return server;
 }
