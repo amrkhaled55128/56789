@@ -37,7 +37,15 @@ export default {
     }
 
     try {
-      const editedUrl = await api.vexEditImage(url, prompt);
+      let editedUrl = await api.vexEditImage(url, prompt);
+      let isFallback = false;
+
+      // إذا تعذر تعديل الصورة بالخادم المباشر، يتم التجسيد الذكي باستخدام Flux AI
+      if (!editedUrl) {
+        editedUrl = await api.vexAiImage(prompt, { model: 'flux' }) || await api.image(prompt);
+        isFallback = true;
+      }
+
       if (!editedUrl) {
         return m.reply('⚠️ تعذر تعديل الصورة — جرب صورة أوضح أو برومبت مختلف');
       }
@@ -46,7 +54,7 @@ export default {
         sock,
         m.jid,
         editedUrl,
-        `🎨 *تم تعديل الصورة بالذكاء الاصطناعي!*\n📝 *الوصف:* ${prompt}`,
+        `🎨 *تم ${isFallback ? 'تجسيد الصورة' : 'تعديل الصورة'} بالذكاء الاصطناعي!*\n📝 *الوصف:* ${prompt}`,
       );
 
       await sendQuickReplies(sock, m.jid, {
@@ -57,8 +65,19 @@ export default {
         ],
       }).catch(() => {});
     } catch (err) {
-      console.error('❌ خطأ في تعديل الصورة:', err.message?.slice(0, 80));
-      return m.reply('❌ حدث خطأ أثناء تعديل الصورة، يرجى المحاولة لاحقاً.');
+      console.warn('⚠️ محاولة التعديل تعذرت، جاري التوليد الاحتياطي:', err.message);
+      try {
+        const fallbackUrl = await api.image(prompt);
+        if (fallbackUrl) {
+          return await sendImage(
+            sock,
+            m.jid,
+            fallbackUrl,
+            `🎨 *تم توليد وتجسيد الصورة بالذكاء الاصطناعي!*\n📝 *الوصف:* ${prompt}`,
+          );
+        }
+      } catch {}
+      return m.reply('❌ تعذر تعديل الصورة حالياً، يرجى المحاولة بوصف مختلف.');
     }
   },
 };
