@@ -2,6 +2,7 @@ import api from './api.js';
 import { sendText, sendImage, sendVideo, sendVoice, sendQuickReplies } from './send.js';
 import { db } from './db.js';
 import { speak } from './tts.js';
+import { imageToUrl } from './protection.js';
 
 // 🤖 AI Tool Calling & Intent Orchestrator لـ Astro / Nova
 // يكتشف نوايا وأفعال المستخدم الطبيعية في المحادثة وينفذ الأدوات التفاعلية فوراً
@@ -35,39 +36,227 @@ export function cleanUserInput(str) {
 }
 
 /**
- * فحص وتصنيف نية المستخدم (Intent Detection)
+ * فحص ما إذا كانت الرسالة الحالية تحتوي على صورة أو تقتبس صورة
+ * @param {object} m - كائن الرسالة
+ * @returns {boolean}
  */
-export function detectIntent(rawText) {
+export function hasAttachedImage(m) {
+  if (!m) return false;
+  return Boolean(
+    m?.message?.imageMessage ||
+    m?.msg?.imageMessage ||
+    m?.msg?.message?.imageMessage ||
+    m?.imageMessage ||
+    m?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
+    m?.quoted?.message?.imageMessage ||
+    m?.quoted?.imageMessage ||
+    m?.quoted?.isImage
+  );
+}
+
+// قائمة المشاهير والشخصيات الصوتية المدعومة وألقابهم الشائعة
+const CELEBRITY_VOICE_MAP = [
+  { id: 'messi', aliases: ['ميسي', 'ليونيل ميسي', 'ليو ميسي', 'messi', 'lionel messi'] },
+  { id: 'goku', aliases: ['غوكو', 'كوكو', 'جوكو', 'goku', 'son goku'] },
+  { id: 'eminem', aliases: ['ايمينيم', 'امينيم', 'eminem', 'slim shady'] },
+  { id: 'therock', aliases: ['ذا روك', 'روك', 'the rock', 'therock', 'صخرة', 'دواين جونسون', 'dwayne johnson'] },
+  { id: 'neymar', aliases: ['نيمار', 'نيمار جونيور', 'neymar', 'neymar jr'] },
+  { id: 'mbappe', aliases: ['مبابي', 'كيليان مبابي', 'mbappe', 'kylian mbappe'] },
+  { id: 'kanye', aliases: ['كانيه', 'كاني', 'كانيي', 'كانيه ويست', 'كاني ويست', 'kanye', 'kanye west'] },
+  { id: 'drake', aliases: ['دريك', 'drake'] },
+  { id: 'snoop', aliases: ['سنوب', 'سنوب دوج', 'سنوب دوغ', 'سنوب دوجي', 'snoop', 'snoop dogg'] },
+  { id: 'ronaldo', aliases: ['رونالدو', 'كريستيانو', 'الدون', 'ronaldo', 'cr7'] },
+  { id: 'trump', aliases: ['ترامب', 'دونالد ترامب', 'trump', 'donald trump'] },
+  { id: 'biden', aliases: ['بايدن', 'جو بايدن', 'biden', 'joe biden'] },
+  { id: 'bellingham', aliases: ['بيلينغهام', 'بيلينجهام', 'bellingham'] },
+];
+
+/**
+ * فحص وتصنيف نية المستخدم (Intent Detection)
+ * @param {string} rawText - النص الأصلي للرسالة
+ * @param {object} [m=null] - كائن الرسالة للتحقق من المرفقات والصور المقتبسة
+ * @returns {object|null} النية المكتشفة مع بارامتراتها المنظفة
+ */
+export function detectIntent(rawText, m = null) {
   const norm = normalizeText(rawText);
   if (!norm) return null;
 
-  // 1. 🎙️ Anime TTS (صوت شخصيات الأنمي والمشاهير)
-  // "قول بصوت غوكو...", "اتكلم بصوت ميسي...", "انطق بصوت ايمينيم..."
-  const animeTtsMatch = norm.match(/^(?:قول|اتكلم|انطق|احكي|غرد|say)\s+(?:لي\s+|ليا\s+)?(?:بصوت|صوت|in(?:\s+the)?\s+voice\s+of|as)\s+([ء-يa-zA-Z0-9]+)(?:[\s:،,-]+(.+))?$/i);
-  if (animeTtsMatch) {
-    let character = animeTtsMatch[1].trim();
-    if (/غوكو|goku|كوكو/.test(character)) character = 'غوكو';
-    else if (/ميسي|messi/.test(character)) character = 'ميسي';
-    else if (/ايمينيم|eminem|امينيم/.test(character)) character = 'ايمينيم';
+  // ─────────────────────────────────────────────────────────────
+  // 1. 🎙️ Celebrity & Athlete Voice Intent (صوت المشاهير والرياضيين والأنمي)
+  // "قول بصوت ميسي", "اتكلم بصوت ميسي", "بصوت غوكو", "بصوت ايمينيم", "بصوت ذا روك", "بصوت نيمار", "بصوت مبابي", "بصوت كانيه", "بصوت دريك", "بصوت سنوب"
+  // ─────────────────────────────────────────────────────────────
+  const ttsPrefixRegex = /^(?:قول|اتكلم|انطق|احكي|غرد|say|speak)?\s*(?:لي\s+|ليا\s+)?(?:بصوت|صوت|in(?:\s+the)?\s+voice\s+of|as)\s+(.+)$/i;
+  const ttsPrefixMatch = norm.match(ttsPrefixRegex);
+  if (ttsPrefixMatch) {
+    const remainder = ttsPrefixMatch[1].trim();
+    let matchedVoice = null;
+    let textAfterVoice = '';
 
-    // استخراج النص الأصلي للقول من rawText
-    let promptText = '';
-    const originalMatch = rawText.match(/(?:بصوت|صوت|in(?:\s+the)?\s+voice\s+of|as)\s+[^\s:،,-]+[\s:،,-]+(.+)$/i);
-    if (originalMatch) {
-      promptText = originalMatch[1].trim();
-    } else if (animeTtsMatch[2]) {
-      promptText = animeTtsMatch[2].trim();
+    // البحث عن تطابق مع المشاهير المعروفين
+    for (const item of CELEBRITY_VOICE_MAP) {
+      for (const alias of item.aliases) {
+        const nAlias = normalizeText(alias);
+        if (
+          remainder === nAlias ||
+          remainder.startsWith(nAlias + ' ') ||
+          remainder.startsWith(nAlias + ':') ||
+          remainder.startsWith(nAlias + '،') ||
+          remainder.startsWith(nAlias + '-')
+        ) {
+          matchedVoice = item.id;
+          textAfterVoice = remainder.slice(nAlias.length).trim().replace(/^[:،,-]\s*/, '');
+          break;
+        }
+      }
+      if (matchedVoice) break;
     }
 
+    // إذا لم تكن شخصية في القائمة، نأخذ الكلمة الأولى كاسم شخصية عامة
+    if (!matchedVoice) {
+      const fallbackMatch = remainder.match(/^([ء-يa-zA-Z0-9]+)(?:[\s:،,-]+(.*))?$/);
+      if (fallbackMatch) {
+        matchedVoice = fallbackMatch[1].trim();
+        textAfterVoice = (fallbackMatch[2] || '').trim();
+      }
+    }
+
+    if (matchedVoice) {
+      // استخراج النص الأصلي بدقة للحفاظ على الحروف الكبيرة والإنجليزية
+      let cleanText = textAfterVoice;
+      const rawAfterVoice = rawText.match(/(?:بصوت|صوت|in(?:\s+the)?\s+voice\s+of|as)\s+[^\s:،,-]+(?:\s+[^\s:،,-]+)?[\s:،,-]+(.+)$/i);
+      if (rawAfterVoice && rawAfterVoice[1]) {
+        cleanText = rawAfterVoice[1].trim();
+      }
+
+      return {
+        type: 'celebrity_tts',
+        voice: matchedVoice,
+        character: matchedVoice,
+        text: cleanText,
+      };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 2. 🎨 Image Editing Intent (تعديل وتغيير الصور بالذكاء الاصطناعي)
+  // Triggers: "عدل الصورة", "عدلي الصورة", "غير الصورة", "خلي الصورة", "عدل دي", "غير الخلفية لـ", "edit image", "modify image", "change image"
+  // ─────────────────────────────────────────────────────────────
+  const imageEditTriggers = [
+    'عدل الصورة', 'عدلي الصورة', 'عدللي الصورة', 'عدل لي الصورة', 'عدل في الصورة', 'عدل علي الصورة', 'عدل على الصورة',
+    'غير الصورة', 'غيرلي الصورة', 'غير لي الصورة',
+    'خلي الصورة', 'خليلي الصورة', 'خلي لي الصورة',
+    'عدل دي', 'عدلي دي', 'عدللي دي', 'عدل لي دي',
+    'غير الخلفية لـ', 'غير الخلفيه لـ', 'غير الخلفية ل', 'غير الخلفيه ل', 'غير الخلفية', 'غير الخلفيه', 'غير خلفية لـ', 'غير خلفيه لـ', 'غير خلفية ل', 'غير خلفيه ل', 'غير خلفية', 'غير خلفيه',
+    'edit image', 'edit the image', 'edit this image', 'edit photo', 'edit the photo', 'edit picture',
+    'modify image', 'modify the image', 'modify photo', 'modify picture',
+    'change image', 'change the image', 'change photo', 'change picture',
+  ];
+
+  const hasImageEditTrigger = imageEditTriggers.some((tr) => norm.includes(normalizeText(tr)));
+  if (hasImageEditTrigger) {
+    let prompt = cleanUserInput(rawText);
+    for (const tr of imageEditTriggers) {
+      const reg = new RegExp(tr.replace(/[\s\-_]+/g, '[\\s\\-_]+'), 'gi');
+      prompt = prompt.replace(reg, ' ');
+    }
+    prompt = prompt
+      .trim()
+      .replace(/^(?:دي\s+|هذه\s+|الصورة\s+|الصوره\s+)/i, '')
+      .replace(/^(?:و\s+|وخليها\s+|وخلي\s+|خليها\s+|خليه\s+|لـ|ل\s+|عن|to\s+|into\s+)/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
     return {
-      type: 'anime_tts',
-      character,
-      text: promptText,
+      type: 'image_edit',
+      prompt,
+      hasImage: hasAttachedImage(m),
     };
   }
 
-  // 2. 📝 كلمات الأغاني (Song Lyrics)
+  // ─────────────────────────────────────────────────────────────
+  // 3. 📱 APK Search/Download Intent (تطبيقات وبرامج أندرويد)
+  // Triggers: "حمللي تطبيق", "حملي تطبيق", "عايز تطبيق", "هاتلي برنامج", "عايز برنامج", "نزل تطبيق", "ابحث عن تطبيق", "تطبيق كذا", "download apk", "get app"
+  // ─────────────────────────────────────────────────────────────
+  const apkTriggers = [
+    'حمللي تطبيق', 'حملي تطبيق', 'حمل لي تطبيق', 'حمل تطبيق',
+    'حمللي برنامج', 'حملي برنامج', 'حمل لي برنامج', 'حمل برنامج',
+    'عايز تطبيق', 'عاوز تطبيق', 'بدي تطبيق', 'محتاج تطبيق',
+    'هاتلي برنامج', 'هات لي برنامج', 'هات برنامج',
+    'هاتلي تطبيق', 'هات لي تطبيق', 'هات تطبيق',
+    'عايز برنامج', 'عاوز برنامج', 'بدي برنامج', 'محتاج برنامج',
+    'نزل تطبيق', 'نزلي تطبيق', 'نزللي تطبيق', 'نزل لي تطبيق',
+    'نزل برنامج', 'نزلي برنامج', 'نزللي برنامج', 'نزل لي برنامج',
+    'ابحث عن تطبيق', 'ابحثلي عن تطبيق', 'ابحث عن برنامج', 'ابحثلي عن برنامج',
+    'دور على تطبيق', 'دورلي على تطبيق', 'دور على برنامج', 'دورلي على برنامج',
+    'download apk', 'download app', 'get app', 'get apk',
+  ];
+
+  const hasApkTrigger = apkTriggers.some((tr) => norm.includes(normalizeText(tr)));
+  const directApkMatch = norm.match(/^(?:تطبيق|برنامج|app|apk)\s+(.+)$/i);
+
+  if (hasApkTrigger || directApkMatch) {
+    let query = cleanUserInput(rawText);
+    for (const tr of apkTriggers) {
+      const reg = new RegExp(tr.replace(/[\s\-_]+/g, '[\\s\\-_]+'), 'gi');
+      query = query.replace(reg, ' ');
+    }
+    query = query
+      .trim()
+      .replace(/^(?:تطبيق|برنامج|app|apk)\s+/i, '')
+      .replace(/^(?:لـ|ل\s+|عن|اسم\s+|for\s+)/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return {
+      type: 'apk_search',
+      query: query || (directApkMatch ? directApkMatch[1].trim() : ''),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 4. 🍿 Akwam Movie/Series Intent (أفلام ومسلسلات موقع أكوام)
+  // Triggers: "عايز فيلم", "ابحث عن فيلم", "هات فيلم", "مسلسل كذا", "فيلم كذا على اكوام", "فيلم كذا", "watch movie", "find movie"
+  // ─────────────────────────────────────────────────────────────
+  const movieTriggers = [
+    'عايز فيلم', 'عاوز فيلم', 'بدي فيلم', 'محتاج فيلم',
+    'عايز مسلسل', 'عاوز مسلسل', 'بدي مسلسل', 'محتاج مسلسل',
+    'ابحث عن فيلم', 'ابحثلي عن فيلم', 'ابحث عن مسلسل', 'ابحثلي عن مسلسل',
+    'دور على فيلم', 'دورلي على فيلم', 'دور على مسلسل', 'دورلي على مسلسل',
+    'هات فيلم', 'هاتلي فيلم', 'هات لي فيلم',
+    'هات مسلسل', 'هاتلي مسلسل', 'هات لي مسلسل',
+    'watch movie', 'watch a movie', 'watch film', 'watch series',
+    'find movie', 'find a movie', 'find film', 'find series',
+    'search movie', 'get movie',
+  ];
+
+  const hasMovieTrigger = movieTriggers.some((tr) => norm.includes(normalizeText(tr)));
+  const directMovieMatch = norm.match(/^(?:فيلم|مسلسل)\s+(.+)$/i);
+  const akwamKeywordMatch = /(?:فيلم|مسلسل)\s+.+?\s+(?:علي|على|في|من)\s+(?:اكوام|أكوام)/i.test(norm);
+
+  if (hasMovieTrigger || directMovieMatch || akwamKeywordMatch) {
+    let query = cleanUserInput(rawText);
+    for (const tr of movieTriggers) {
+      const reg = new RegExp(tr.replace(/[\s\-_]+/g, '[\\s\\-_]+'), 'gi');
+      query = query.replace(reg, ' ');
+    }
+    query = query
+      .replace(/[\s\-_]*(?:علي|على|في|من)\s+(?:اكوام|أكوام|موقع\s+اكوام|موقع\s+أكوام)[\s\-_]*/gi, ' ')
+      .trim()
+      .replace(/^(?:فيلم|مسلسل|movie|series|film)\s+/i, '')
+      .replace(/^(?:لـ|ل\s+|عن|اسم\s+|of\s+|about\s+)/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return {
+      type: 'movie_search',
+      query,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 5. 📝 كلمات الأغاني (Song Lyrics)
   // "كلمات اغنية...", "كلمات تراك...", "lyrics of..."
+  // ─────────────────────────────────────────────────────────────
   const lyricsPattern = /^(?:عايز|عاوز|بدي|محتاج|هات|جيب|ابحث\s+عن|ابحثلي\s+عن|وريني)?\s*كلمات\s+(?:اغنيه|تراك|انشوده|لحن|song)?\s*(?:لـ|ل|عن)?\s*(.+)$/i;
   const lyricsEnPattern = /^(?:lyrics\s+(?:of|for)|song\s+lyrics(?:\s+for)?)\s*(.+)$/i;
   if (lyricsPattern.test(norm) || lyricsEnPattern.test(norm)) {
@@ -90,7 +279,9 @@ export function detectIntent(rawText) {
     };
   }
 
-  // 3. 🔍 أدوات البحث (تيك توك، بينترست، يوتيوب)
+  // ─────────────────────────────────────────────────────────────
+  // 6. 🔍 أدوات البحث (تيك توك، بينترست، يوتيوب)
+  // ─────────────────────────────────────────────────────────────
   // a) تيك توك: "ابحثلي في تيك توك عن...", "ابحث في تيك توك عن...", "دور في تيك توك عن..."
   const ttSearchPattern = /(?:ابحثلي|ابحث\s+لي|ابحث|دورلي|دور\s+لي|دور|سيرش|search)\s+(?:في|علي|على|بـ|ب)?\s*(?:تيك\s*توك|tiktok)\s*(?:عن|علي|على|for)?\s*(.+)/i;
   const ttDirectPattern = /^(?:تيك\s*توك|tiktok)\s+(?:عن|for)\s*(.+)$/i;
@@ -129,8 +320,10 @@ export function detectIntent(rawText) {
     };
   }
 
-  // 4. 🎬 Video Generation (صناعة الفيديو بالذكاء الاصطناعي)
+  // ─────────────────────────────────────────────────────────────
+  // 7. 🎬 Video Generation (صناعة الفيديو بالذكاء الاصطناعي)
   // "اعمللي فيديو", "سويلي فيديو", "عايز فيديو", "فيديو لـ", "توليد فيديو", "اصنع فيديو", "make video", "generate video"
+  // ─────────────────────────────────────────────────────────────
   const videoTriggers = [
     'اعمللي فيديو', 'اعمل لي فيديو', 'اعملي فيديو', 'اعمل فيديو',
     'سويلي فيديو', 'سوي لي فيديو', 'سوي فيديو',
@@ -171,8 +364,10 @@ export function detectIntent(rawText) {
     };
   }
 
-  // 5. 🎨 Image Generation (رسم الصور بالذكاء الاصطناعي)
+  // ─────────────────────────────────────────────────────────────
+  // 8. 🎨 Image Generation (رسم الصور بالذكاء الاصطناعي)
   // "ارسم لي", "ارسم", "عايز صورة", "اعملي صورة", "صورة لـ", "توليد صورة", "draw me", "generate image"
+  // ─────────────────────────────────────────────────────────────
   const imageTriggers = [
     'ارسم لي صورة', 'ارسم لي', 'ارسملي', 'ارسم ليا', 'ارسم صورة', 'ارسم',
     'عايز صورة', 'عاوز صورة', 'بدي صورة', 'محتاج صورة',
@@ -213,8 +408,10 @@ export function detectIntent(rawText) {
     };
   }
 
-  // 6. 🎵 Song & Music Search/Download (الأغاني والموسيقى)
+  // ─────────────────────────────────────────────────────────────
+  // 9. 🎵 Song & Music Search/Download (الأغاني والموسيقى)
   // "حملي اغنية", "شغللي اغنية", "عايز اغنية", "اسمع اغنية", "هات اغنية", "نزل اغنية"
+  // ─────────────────────────────────────────────────────────────
   const songTriggers = [
     'حمللي اغنية', 'حملي اغنية', 'حمل لي اغنية', 'حمل اغنية', 'حمللي تراك', 'حمل تراك',
     'شغللي اغنية', 'شغل لي اغنية', 'شغل اغنية', 'شغللي تراك', 'شغل تراك',
@@ -258,13 +455,235 @@ export function detectIntent(rawText) {
 export async function dispatchToolAction(sock, m, text, profile) {
   if (!text || typeof text !== 'string') return false;
 
-  const intent = detectIntent(text);
+  const intent = detectIntent(text, m);
   if (!intent) return false;
 
   console.log(`🎯 [Tool-Caller] تم اكتشاف أداة ذكية: ${intent.type} للرسالة: "${text.slice(0, 50)}"`);
 
   // ─────────────────────────────────────────────────────────────
-  // a) Video Generation (صناعة الفيديو)
+  // a) Image Editing Intent (تعديل الصور بالذكاء الاصطناعي)
+  // ─────────────────────────────────────────────────────────────
+  if (intent.type === 'image_edit') {
+    let imageUrl = null;
+    try {
+      imageUrl = (await imageToUrl(m).catch(() => null)) || (m.quoted ? await imageToUrl(m.quoted).catch(() => null) : null);
+    } catch {
+      imageUrl = null;
+    }
+
+    // إذا لم تكن هناك صورة مرفقة أو مقتبسة
+    if (!imageUrl) {
+      await sendText(
+        sock,
+        m.jid,
+        '🖼️ ابعتلي الصورة أو رد عليها بطلب التعديل يا فنان عشان أعدلهالك بالذكاء الاصطناعي! 🎨✨\nمثال: رد على صورتك واكتب "عدل الصورة خليها أنمي"',
+      );
+      return true;
+    }
+
+    const cleanPrompt = intent.prompt || 'تعديل وتحسين الصورة بالذكاء الاصطناعي';
+
+    // رسالة الانتظار بلهجة مصرية محببة
+    await sendText(sock, m.jid, '🎨 حاضر يا فنان! جاري تعديل صورتك بالذكاء الاصطناعي... ⏳');
+
+    try {
+      const editedUrl = await api.vexEditImage(imageUrl, cleanPrompt);
+      if (!editedUrl) throw new Error('لم يرجع رابط صورة من سيرفر التعديل');
+
+      await sendImage(sock, m.jid, editedUrl, `🎨 *${cleanPrompt}*`);
+
+      // أزرار المتابعة التفاعلية
+      await sendQuickReplies(sock, m.jid, {
+        title: '🎨 خيارات الصورة المعدلة',
+        text: 'عجبك التعديل يا فنان؟ تقدر تحول الصورة لفيديو أو ترسم نسخة ثانية بالذكاء الاصطناعي 👇',
+        buttons: [
+          { label: '🎬 تحويل إلى فيديو', id: `اعمللي فيديو ${cleanPrompt}` },
+          { label: '🎨 رسم نسخة ثانية', id: `ارسم لي ${cleanPrompt}` },
+        ],
+      });
+    } catch (err) {
+      console.error('❌ فشل تعديل الصورة في tool-caller:', err.message);
+      await sendText(
+        sock,
+        m.jid,
+        '🥴 معلش يا فنان، سيرفر تعديل الصور مضغوط دلوقتي أو الصورة غير واضحة، جرّب تاني بعد لحظات!',
+      );
+    }
+    return true;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // b) APK Search/Download Intent (تطبيقات وبرامج أندرويد)
+  // ─────────────────────────────────────────────────────────────
+  if (intent.type === 'apk_search') {
+    const cleanQuery = intent.query;
+
+    if (!cleanQuery || cleanQuery.length < 2) {
+      await sendText(
+        sock,
+        m.jid,
+        '📱 قولي اسم التطبيق أو اللعبة اللي عايز تبحث عنها يا غالي! 🚀\nمثال: "عايز تطبيق WhatsApp" أو "حمللي تطبيق سناب شات"',
+      );
+      return true;
+    }
+
+    // رسالة الانتظار
+    await sendText(sock, m.jid, '📱 ثواني يا غالي، بجيبلك ملف التطبيق الأصلي من المتجر... ⏳');
+
+    try {
+      const results = await api.vexApk(cleanQuery, 3).catch(() => []);
+      if (!results || !results.length) {
+        await sendText(
+          sock,
+          m.jid,
+          `😕 ملقتش تطبيق "${cleanQuery}" في المتجر يا صاحبي، اتأكد من كتابة الاسم صح وجرب تاني!`,
+        );
+        return true;
+      }
+
+      // حفظ في الكاش عشان الأزرار
+      const all = db.get('searchCache', {});
+      all[m.jid] = { type: 'apk', results, at: Date.now() };
+      db.set('searchCache', all);
+
+      const details = results.slice(0, 3).map((app, i) => {
+        const sizeStr = app.sizeHuman ? ` • 📦 ${app.sizeHuman}` : '';
+        const verStr = app.version ? ` (v${app.version})` : '';
+        const ratingStr = app.rating ? ` • ⭐ ${app.rating}` : '';
+        const devStr = app.developer ? `\n👤 المطور: ${app.developer}` : '';
+        const linkStr = app.apkUrl ? `\n🔗 التحميل المباشر: ${app.apkUrl}` : (app.pageUrl ? `\n🔗 الصفحة: ${app.pageUrl}` : '');
+        return `${i + 1}. 📱 *${app.name}*${verStr}${sizeStr}${ratingStr}${devStr}${linkStr}`;
+      }).join('\n\n───────────────────\n\n');
+
+      const buttons = results.slice(0, 3).map((app, i) => ({
+        label: `📥 تحميل ${String(app.name).slice(0, 20)}`,
+        id: `.apk dl-${i}`,
+      }));
+
+      await sendQuickReplies(sock, m.jid, {
+        title: `📱 نتائج تطبيق: ${cleanQuery.slice(0, 25)}`,
+        text: `${details}\n\nاختر التطبيق لتحميله فوراً 👇`,
+        buttons,
+      });
+    } catch (err) {
+      console.error('❌ فشل بحث التطبيقات في tool-caller:', err.message);
+      await sendText(sock, m.jid, '🥴 تعذر البحث عن التطبيق حالياً، جرب تاني كمان شوية!');
+    }
+    return true;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // c) Akwam Movie/Series Intent (أفلام ومسلسلات أكوام)
+  // ─────────────────────────────────────────────────────────────
+  if (intent.type === 'movie_search') {
+    const cleanQuery = intent.query;
+
+    if (!cleanQuery || cleanQuery.length < 2) {
+      await sendText(
+        sock,
+        m.jid,
+        '🍿 قولي اسم الفيلم أو المسلسل اللي عايز تسهر عليه يا نجم! 🎬\nمثال: "عايز فيلم The Batman" أو "مسلسل قيامة عثمان"',
+      );
+      return true;
+    }
+
+    // رسالة الانتظار
+    await sendText(sock, m.jid, '🍿 أحلى سهرة سينمائية لعيونك! بدورلك في أكوام على الفيلم... ⏳');
+
+    try {
+      const results = await api.vexAkwam(cleanQuery).catch(() => []);
+      if (!results || !results.length) {
+        await sendText(
+          sock,
+          m.jid,
+          `😕 ملقتش فيلم أو مسلسل باسم "${cleanQuery}" على أكوام، اتأكد من الاسم وجرب تاني!`,
+        );
+        return true;
+      }
+
+      const all = db.get('searchCache', {});
+      all[m.jid] = { type: 'akwam', results, at: Date.now() };
+      db.set('searchCache', all);
+
+      const first = results[0];
+      const posterUrl = first?.poster;
+
+      const listText = results.slice(0, 3).map((item, i) => {
+        const yearStr = item.year ? ` (${item.year})` : '';
+        const rateStr = item.rating ? ` • ⭐ ${item.rating}` : '';
+        const qualStr = item.quality ? ` • 🎞️ ${item.quality}` : '';
+        const typeStr = item.type ? ` [${item.type}]` : '';
+        const linkStr = item.url ? `\n🔗 المشاهدة والتحميل: ${item.url}` : '';
+        return `${i + 1}. 🎬 *${item.title}*${yearStr}${typeStr}${rateStr}${qualStr}${linkStr}`;
+      }).join('\n\n───────────────────\n\n');
+
+      const fullText = `🍿 *نتائج البحث في أكوام: ${cleanQuery}*\n\n${listText}`;
+
+      // إرسال بوستر الفيلم مع التفاصيل
+      if (posterUrl) {
+        await sendImage(sock, m.jid, posterUrl, fullText);
+      } else {
+        await sendText(sock, m.jid, fullText);
+      }
+
+      const buttons = results.slice(0, 3).map((item, i) => ({
+        label: `🍿 ${String(item.title).slice(0, 22)}`,
+        id: `.akwam watch-${i}`,
+      }));
+
+      if (buttons.length > 0) {
+        await sendQuickReplies(sock, m.jid, {
+          title: `🍿 سهرة أكوام: ${cleanQuery.slice(0, 25)}`,
+          text: 'اختر العمل لعرض تفاصيل التحميل والمشاهدة السريعة 👇',
+          buttons,
+        });
+      }
+    } catch (err) {
+      console.error('❌ فشل بحث أكوام في tool-caller:', err.message);
+      await sendText(sock, m.jid, '🥴 تعذر البحث في أكوام حالياً، جرب تاني كمان شوية!');
+    }
+    return true;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // d) Celebrity & Athlete Voice Intent (صوت المشاهير والشخصيات)
+  // ─────────────────────────────────────────────────────────────
+  if (intent.type === 'celebrity_tts' || intent.type === 'anime_tts') {
+    const voice = intent.voice || intent.character || 'messi';
+    const cleanText = intent.text;
+
+    if (!cleanText || cleanText.length < 2) {
+      await sendText(
+        sock,
+        m.jid,
+        `🎙️ قولي يا فنان تحب ${voice} يقول إيه بالظبط؟ ⚽🔥\nمثال: "قول بصوت ${voice} أنا الأفضل في التاريخ"`,
+      );
+      return true;
+    }
+
+    try {
+      let audioUrl = null;
+      if (typeof api.vexTts === 'function') {
+        audioUrl = await api.vexTts(cleanText.slice(0, 400), voice).catch(() => null);
+      }
+      if (!audioUrl && typeof api.animeTts === 'function') {
+        audioUrl = await api.animeTts(cleanText.slice(0, 400), voice).catch(() => null);
+      }
+
+      if (audioUrl) {
+        await sendVoice(sock, m.jid, audioUrl);
+      } else {
+        await speak(sock, m.jid, cleanText, { voice });
+      }
+    } catch (err) {
+      console.error('❌ فشل صوت المشاهير في tool-caller:', err.message);
+      await sendText(sock, m.jid, `🥴 معلش يا صاحبي حصل مشكلة في تقليد صوت ${voice} دلوقتي، جرب تاني!`);
+    }
+    return true;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // e) Video Generation (صناعة الفيديو)
   // ─────────────────────────────────────────────────────────────
   if (intent.type === 'video_gen') {
     const cleanPrompt = intent.prompt;
@@ -313,7 +732,7 @@ export async function dispatchToolAction(sock, m, text, profile) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // b) Image Generation (رسم الصور)
+  // f) Image Generation (رسم الصور)
   // ─────────────────────────────────────────────────────────────
   if (intent.type === 'image_gen') {
     const cleanPrompt = intent.prompt;
@@ -357,7 +776,7 @@ export async function dispatchToolAction(sock, m, text, profile) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // c) Song & Music Search/Download (الأغاني والموسيقى)
+  // g) Song & Music Search/Download (الأغاني والموسيقى)
   // ─────────────────────────────────────────────────────────────
   if (intent.type === 'song_download') {
     const cleanQuery = intent.query;
@@ -426,7 +845,7 @@ export async function dispatchToolAction(sock, m, text, profile) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // d) Search Tools (بحث تيك توك، بينترست، يوتيوب)
+  // h) Search Tools (بحث تيك توك، بينترست، يوتيوب)
   // ─────────────────────────────────────────────────────────────
   if (intent.type === 'tiktok_search') {
     const query = intent.query;
@@ -560,7 +979,7 @@ export async function dispatchToolAction(sock, m, text, profile) {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // e) Song Lyrics (كلمات الأغاني)
+  // i) Song Lyrics (كلمات الأغاني)
   // ─────────────────────────────────────────────────────────────
   if (intent.type === 'lyrics') {
     const query = intent.query;
@@ -596,37 +1015,6 @@ export async function dispatchToolAction(sock, m, text, profile) {
     return true;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // f) Anime TTS (صوت شخصيات الأنمي)
-  // ─────────────────────────────────────────────────────────────
-  if (intent.type === 'anime_tts') {
-    const character = intent.character || 'غوكو';
-    const textToSay = intent.text;
-
-    if (!textToSay || textToSay.length < 2) {
-      await sendText(
-        sock,
-        m.jid,
-        `🎙️ قولي عايز ${character} يقول إيه بالظبط؟ 🔥\nمثال: "قول بصوت ${character} أنا أقوى محارب في الكون"`,
-      );
-      return true;
-    }
-
-    try {
-      const url = await api.animeTts(textToSay.slice(0, 300), character).catch(() => null);
-      if (url) {
-        await sendVoice(sock, m.jid, url);
-      } else {
-        // احتياطي إذا تعذر صوت الأنمي
-        await speak(sock, m.jid, textToSay, { voice: character });
-      }
-    } catch (err) {
-      console.error('❌ فشل صوت الأنمي:', err.message);
-      await sendText(sock, m.jid, `🥴 معلش يا صاحبي حصل مشكلة في تقليد صوت ${character} دلوقتي، جرب تاني!`);
-    }
-    return true;
-  }
-
   return false;
 }
 
@@ -635,4 +1023,5 @@ export default {
   detectIntent,
   normalizeText,
   cleanUserInput,
+  hasAttachedImage,
 };

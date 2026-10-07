@@ -157,7 +157,14 @@ function norm(j) {
 // تحميل صورة من رسالة ورفعها لاستضافة مؤقتة → رابط (للرؤية والفحص)
 export async function imageToUrl(msg) {
   try {
-    const stream = await downloadContentFromMessage(msg.message.imageMessage, 'image');
+    const imgMsg =
+      msg?.message?.imageMessage ||
+      msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
+      msg?.quoted?.imageMessage ||
+      msg?.msg?.message?.imageMessage ||
+      msg?.imageMessage;
+    if (!imgMsg) return null;
+    const stream = await downloadContentFromMessage(imgMsg, 'image');
     let buffer = Buffer.alloc(0);
     for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
     return await uploadBuffer(buffer);

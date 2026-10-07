@@ -191,6 +191,9 @@ function buildContext(sock, msg, message, body) {
     sock,
     msg,
     message,
+    get quoted() {
+      return message?.extendedTextMessage?.contextInfo?.quotedMessage ?? null;
+    },
     body,
     jid,
     sender,

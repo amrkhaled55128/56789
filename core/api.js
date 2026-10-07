@@ -130,6 +130,60 @@ async function post(path, body = {}, timeout = 30000) {
   }
 }
 
+const vexHttp = axios.create({
+  baseURL: 'https://johan-vex-apis.vercel.app',
+  headers: { Accept: '*/*' },
+  timeout: 60000,
+});
+
+async function vexGet(path, params = {}, timeout = 60000) {
+  const b = breakerOf(`vex:${path}`);
+
+  if (Date.now() < b.openUntil) {
+    throw new Error('خدمة VEX في وضع آمن مؤقت — استنى شوية');
+  }
+
+  try {
+    const res = await vexHttp.get(path, {
+      params,
+      timeout,
+      validateStatus: (status) => status < 500,
+    });
+    const data = res.data;
+
+    // 404 في البحث يعني مفيش نتائج مطابقة — ليس عطلاً في الخادم
+    if (
+      res.status === 404 ||
+      (data && data.success === false && /لا توجد نتائج|not found/i.test(data.error || data.message || ''))
+    ) {
+      b.state = 'ok';
+      b.fails = 0;
+      return { success: true, results: [], data: [] };
+    }
+
+    const result = unwrap(data, path);
+    if (b.notified) notifyOwner(`🟢 VEX API رجع يشتغل: ${path}`);
+    b.notified = false;
+    b.state = 'ok';
+    b.fails = 0;
+    publishStatus();
+    return result;
+  } catch (err) {
+    b.state = 'degraded';
+    b.fails++;
+    if (b.fails >= FAIL_LIMIT && Date.now() >= b.openUntil) {
+      b.openUntil = Date.now() + OPEN_MS;
+      b.state = 'open';
+      b.fails = 0;
+      b.notified = true;
+      console.error(`🔴 VEX ${path} دخل وضع آمن ${OPEN_MS / 1000} ثانية`);
+      notifyOwner(`🔴 تنبيه: VEX ${path} فشل ${FAIL_LIMIT} مرات — وضع آمن ${OPEN_MS / 1000} ثانية`);
+    }
+    publishStatus();
+    throw err;
+  }
+}
+
 // حالة الـ API كلها (للسجل والداشبورد)
 export function apiHealth() {
   const now = Date.now();
@@ -489,6 +543,60 @@ export const api = {
   async executeCode(code) {
     const d = await post('/api/__v0/_execute', { code }, 30000);
     return d.result ?? d;
+  },
+
+  // ━━━━━━━━━ 🌐 VEX API (https://johan-vex-apis.vercel.app) ━━━━━━━━━
+
+  // 🎨 تعديل الصور بالذكاء الاصطناعي — Nano Banana AI
+  async vexEditImage(imageUrl, prompt) {
+    const d = await vexGet('/api/tools/nanobanan', { url: imageUrl, prompt }, 90000);
+    return d.data?.result_url ?? d.result_url ?? d.url ?? null;
+  },
+
+  // 📱 تطبيقات وألعاب أندرويد APK
+  async vexApk(q, limit = 3) {
+    const d = await vexGet('/api/search/apk', { q, limit });
+    const items = d.results ?? d.data ?? [];
+    return (Array.isArray(items) ? items : []).map((app) => ({
+      name: String(app.name ?? '').trim(),
+      uname: String(app.uname ?? '').trim(),
+      package: String(app.package ?? '').trim(),
+      version: String(app.version ?? '').trim(),
+      sizeHuman: String(app.sizeHuman ?? app.size ?? '').trim(),
+      malware: String(app.malware ?? '').trim(),
+      rating: Number(app.rating) || 0,
+      downloads: Number(app.downloads) || 0,
+      apkUrl: String(app.apkUrl ?? app.download_url ?? app.url ?? '').trim(),
+      pageUrl: String(app.pageUrl ?? '').trim(),
+      icon: app.icon ?? null,
+    }));
+  },
+
+  // 🗣️ تحويل النص إلى صوت مشاهير وشخصيات
+  async vexTts(text, voice = 'messi') {
+    const d = await vexGet('/api/ai/tts', { text, voice, format: 'json' });
+    return d.audio_url ?? d.data?.audio_url ?? d.url ?? null;
+  },
+
+  // 🎬 أفلام ومسلسلات من موقع أكوام
+  async vexAkwam(q) {
+    const d = await vexGet('/api/search/akwam', { q });
+    const items = d.results ?? d.data ?? [];
+    return (Array.isArray(items) ? items : []).map((m) => ({
+      title: String(m.title ?? '').trim(),
+      type: String(m.type ?? '').trim(),
+      year: String(m.year ?? '').trim(),
+      rating: String(m.rating ?? '').trim(),
+      quality: String(m.quality ?? '').trim(),
+      poster: m.poster ?? m.image ?? null,
+      url: String(m.url ?? '').trim(),
+    }));
+  },
+
+  // 🎵 بحث ساوندكلاود
+  async vexSoundcloud(q, action = 'search') {
+    const d = await vexGet('/api/search/soundcloud', { q, action });
+    return d.results ?? d.data ?? [];
   },
 };
 
