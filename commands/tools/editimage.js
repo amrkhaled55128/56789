@@ -1,5 +1,6 @@
 import { sendImage, sendText, sendQuickReplies } from '../../core/send.js';
 import { imageToUrl } from '../../core/protection.js';
+import { getMediaSource, uploadBuffer } from '../../core/media.js';
 import api from '../../core/api.js';
 
 // 🎨 .editimage / .edit — تعديل الصور بالذكاء الاصطناعي
@@ -29,20 +30,28 @@ export default {
       return m.reply('✍️ اكتب الوصف أو التعديل المطلوب مع الصورة!\nمثال: `.edit حولها لكرتون 3D`');
     }
 
-    await sendText(sock, m.jid, '🎨 جاري تعديل الصورة بالذكاء الاصطناعي... استنى شوية');
+    await sendText(sock, m.jid, '🎨 جاري تعديل وتجسيد الصورة بالذكاء الاصطناعي... استنى شوية ⏳');
 
-    const url = await imageToUrl(m);
+    let url = await imageToUrl(m);
     if (!url) {
-      return m.reply('❌ تعذر استخراج أو رفع الصورة — حاول مرة تانية');
+      try {
+        const media = await getMediaSource(m);
+        if (media?.buffer) {
+          url = await uploadBuffer(media.buffer);
+        }
+      } catch {}
     }
 
     try {
-      let editedUrl = await api.vexEditImage(url, prompt);
+      let editedUrl = null;
+      if (url) {
+        editedUrl = await api.vexEditImage(url, prompt).catch(() => null);
+      }
       let isFallback = false;
 
-      // إذا تعذر تعديل الصورة بالخادم المباشر، يتم التجسيد الذكي باستخدام Flux AI
+      // إذا تعذر تعديل الصورة بالخادم المباشر، يتم التجسيد الفوري الذكي بالذكاء الاصطناعي
       if (!editedUrl) {
-        editedUrl = await api.vexAiImage(prompt, { model: 'flux' }) || await api.image(prompt);
+        editedUrl = (await api.image(prompt).catch(() => null)) || (await api.vexAiImage(prompt, { model: 'flux' }).catch(() => null));
         isFallback = true;
       }
 
