@@ -2,11 +2,12 @@ import fs from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { restoreKvFromDb, saveAllKvToDb } from './postgres.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// ☁️ على Railway بيكون في volume واحد على /app/session — فبنخزن البيانات جواه
-// عشان مايفقدش أي حاجة بعد إعادة النشر. محليًا بيفضل مجلد data منفصل.
-const isCloud = !!process.env.RAILWAY_ENVIRONMENT;
+// ☁️ على المنصات السحابية (Railway / CranL / Docker)
+const isCloud = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.CRANL || process.env.NODE_ENV === 'production';
 const DATA_DIR = isCloud
   ? join(__dirname, '..', 'session', 'data')
   : join(__dirname, '..', 'data');
@@ -17,14 +18,7 @@ const saveTimers = new Map();
 
 /**
  * قاعدة بيانات بسيطة بصيغة JSON — حفظ مؤجل (debounce) عشان ميسبقش الأوامر.
- *
- * العقد:
- * - get(key, fallback) بيرجّع المرجع الحي — اللي بيعدّل فيه على مسؤوليته
- *   وينادي set() أو save() بعدها.
- * - الكتابة ذرية: ملف tmp + fsync + rename — مايتقطعش نص الكتابة.
- * - علامة اتساخ (#lastJson): لو المحتوى زي ما اتكتب آخر مرة مفيش rename ولا
- *   نسخة احتياطية — المندوبات الدورية اللي بتقرا وتكتب نفس القيمة مبتبوّظش القرص.
- * لما المشروع يكبر نقدر نرقّيها لـ SQLite من غير ما نغير واجهة الاستخدام.
+ * مع دعم الحفظ السحابي في PostgreSQL لو متوفر.
  */
 class DB {
   constructor(fileName) {
@@ -32,9 +26,22 @@ class DB {
     this.backup = join(DATA_DIR, fileName.replace(/\.json$/, '') + '.lastgood.json');
     this.data = this.#read();
     this.#lastJson = JSON.stringify(this.data, null, 2);
+    this.#initCloudSync();
   }
 
   #lastJson;
+
+  async #initCloudSync() {
+    try {
+      const kv = await restoreKvFromDb();
+      if (kv && typeof kv === 'object' && Object.keys(kv).length) {
+        this.data = { ...this.data, ...kv };
+        this.#lastJson = JSON.stringify(this.data, null, 2);
+      }
+    } catch (err) {
+      console.warn('⚠️ تعذر مزامنة بيانات البوت من PostgreSQL:', err.message);
+    }
+  }
 
   // 🧊 عزل الملف التالف — بدل ما يضيع بصمت بنسخه باسم فيه الوقت للتشخيص بعدين
   #quarantineIfPresent(file) {
@@ -118,6 +125,7 @@ class DB {
       }
       fs.renameSync(tmp, this.file);
       this.#lastJson = json;
+      saveAllKvToDb(this.data);
     } catch (err) {
       console.error('❌ فشل حفظ قاعدة البيانات:', err.message?.slice(0, 100));
       try {
@@ -131,6 +139,7 @@ class DB {
   // ⚠️ كان مفيش flush — آخر 250ms قبل إعادة النشر كانت بتضيع.
   // بناديه من index.js عند SIGTERM/SIGINT.
   flush() {
+    saveAllKvToDb(this.data);
     const timer = saveTimers.get(this.file);
     if (timer) {
       clearTimeout(timer);

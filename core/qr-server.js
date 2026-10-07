@@ -8,10 +8,16 @@ import { fileURLToPath } from 'node:url';
 import { fullSnapshot } from './stats.js';
 import { db } from './db.js';
 import { config } from '../config.js';
+import {
+  isDbConnected,
+  isDbConfigured,
+  exportSessionDump,
+  importSessionDump,
+} from './postgres.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// ☁️ على Railway ملف الـ QR جوّه الـ volume — ومُصدَّر عشان connection.js
-// تكتب فيه على نفس المسار بالظبط (كان محسوب مرتين في ملفين لوحدهم)
+const SESSION_DIR = join(__dirname, '..', 'session');
+// ☁️ على المنصات السحابية ملف الـ QR جوّه مجلد data أو session
 export const QR_FILE = join(
   __dirname,
   '..',
@@ -73,8 +79,12 @@ const PAGE = `<!DOCTYPE html>
   <div class="card"><div class="num" id="c-uptime">0 ثانية</div><div class="lbl">مدة التشغيل</div></div>
   <div class="card"><div class="num" id="c-msgs">0</div><div class="lbl">الرسايل</div></div>
   <div class="card"><div class="num" id="c-cmds">0</div><div class="lbl">الأوامر</div></div>
+  <div class="card"><div class="num" id="c-db">🐘 فحص</div><div class="lbl">قاعدة البيانات</div></div>
   <div class="card"><div class="num" id="c-api">🟢 شغال</div><div class="lbl">حالة API</div></div>
   <div class="card"><div class="num" id="c-mem">0</div><div class="lbl">في الذاكرة</div></div>
+</div>
+<div class="wide" style="text-align:center;padding:12px;">
+  <a href="/api/session/export" download="nova-session-backup.json" style="color:#00a884;text-decoration:none;font-weight:bold;font-size:13px;background:#111b21;padding:8px 16px;border-radius:8px;display:inline-block;border:1px solid #2a3942;">💾 تحميل نسخة احتياطية من الجلسة</a>
 </div>
 <div class="wide"><h3>👥 الناس اللي في ذاكرة استرو</h3><div id="people"><div class="row">جارٍ التحميل...</div></div></div>
 <div class="wide"><h3>💬 الجروبات</h3><div id="groups"><div class="row">جارٍ التحميل...</div></div></div>
@@ -102,6 +112,7 @@ async function tick() {
     document.getElementById('c-uptime').textContent = fmtUptime(d.uptime || 0);
     document.getElementById('c-msgs').textContent = d.messages || 0;
     document.getElementById('c-cmds').textContent = d.commands || 0;
+    document.getElementById('c-db').textContent = d.database?.connected ? '🐘 متصلة' : (d.database?.configured ? '🟡 سحابية' : '📁 محلي');
     document.getElementById('c-api').textContent = d.apiStatus === 'ok' ? '🟢 شغال' : '🔴 وضع آمن';
     document.getElementById('c-mem').textContent = (d.people ?? []).length + ' شخص';
 
@@ -184,6 +195,36 @@ export function startQrServer(port = 3000) {
         return;
       }
 
+      // 💾 تصدير نسخة احتياطية من الجلسة
+      if (req.url === '/api/session/export') {
+        const dump = await exportSessionDump(SESSION_DIR);
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Disposition': 'attachment; filename="nova-session-backup.json"',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(dump, null, 2));
+        return;
+      }
+
+      // 📥 استيراد نسخة احتياطية للجلسة
+      if (req.url === '/api/session/import' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const parsed = JSON.parse(body);
+            const count = await importSessionDump(SESSION_DIR, parsed);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, count }));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        });
+        return;
+      }
+
       // 📊 بيانات الداشبورد الحية
       if (req.url.startsWith('/stats')) {
         const snap = await fullSnapshot();
@@ -198,7 +239,15 @@ export function startQrServer(port = 3000) {
         });
         const connected = typeof snap.connected === 'boolean' ? snap.connected : !readQr();
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ ...snap, people, connected }));
+        res.end(JSON.stringify({
+          ...snap,
+          people,
+          connected,
+          database: {
+            connected: isDbConnected(),
+            configured: isDbConfigured(),
+          },
+        }));
         return;
       }
 

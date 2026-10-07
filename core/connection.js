@@ -23,6 +23,12 @@ import { setGroupsProvider, setApiStatus, setConnected } from './stats.js';
 import { db } from './db.js';
 import { QR_FILE } from './qr-server.js';
 import api, { setOwnerNotifier, onApiStatus } from './api.js';
+import {
+  restoreSessionFromDb,
+  scheduleSessionSync,
+  syncSessionToDb,
+  clearSessionFromDb,
+} from './postgres.js';
 
 const logger = pino({ level: 'silent' });
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +54,9 @@ function saveQr(qr) {
 }
 
 export async function startBot() {
+  // 🐘 استرجاع ملفات الجلسة من قاعدة بيانات PostgreSQL السحابية لو كانت موجودة
+  await restoreSessionFromDb(SESSION_DIR);
+
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
   // 🧠 ترحيل الذاكرة القديمة للهويات الجديدة (مرة واحدة)
@@ -87,7 +96,10 @@ export async function startBot() {
     syncFullHistory: false,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    scheduleSessionSync(SESSION_DIR, 2000);
+  });
   sock.ev.on('connection.update', (update) => onConnectionUpdate(sock, update));
   sock.ev.on('messages.upsert', (upsert) => handleUpsert(sock, { commands, categories }, upsert));
 
@@ -249,6 +261,8 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
     const number = sock.user?.id?.split(':')[0] ?? '';
     console.log(`\n✅ ${config.botName} ${config.botEmoji} شغال! (مرتبط بـ ${number})`);
     console.log(`🧩 البادئة: ${config.prefix} — جرّب اكتب ${config.prefix}menu في أي شات\n`);
+    // 💾 مزامنة كل ملفات الجلسة مع قاعدة بيانات PostgreSQL السحابية فور فتح الاتصال
+    syncSessionToDb(SESSION_DIR).catch(() => {});
   }
 
   if (connection === 'close') {
@@ -260,6 +274,7 @@ function onConnectionUpdate(sock, { connection, lastDisconnect, qr }) {
       // (لأن DATA_DIR = session/data) يعني كل ذاكرة الناس والاقتصاد
       // والتذكيرات اتمسحت مع ملفات الدخول. دلوقتي بنمسح المصادقة بس.
       clearAuthFiles();
+      clearSessionFromDb().catch(() => {});
       // ⛔ قبلكان كنا بنعمل return وخلاص — البوت بيفضل ميت من غير QR جديد
       // لحد ريستارت يدوي والداشبورد يقول «متصل»! بنشغّل البوت تاني عشان
       // يتولد QR، مع عداد حماية من اللوب اللانهائي.
