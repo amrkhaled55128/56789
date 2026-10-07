@@ -202,30 +202,60 @@ export const api = {
     return d.response?.reply ?? '';
   },
 
-  // صورة بالذكاء الاصطناعي — imageai أسرع (6s)، gpt-image احتياط أجمل (32s)
-  async image(prompt, { pretty = false } = {}) {
-    const attempts = pretty
-      ? ['/api/v1/ai/gpt-image', '/api/v1/ai/imageai']
-      : ['/api/v1/ai/imageai', '/api/v1/ai/gpt-image'];
+  // صورة بالذكاء الاصطناعي — imageai (Flux) أساسي، image-generator (MagicStudio) احتياطي
+  async image(prompt, { model = '1', pretty = false } = {}) {
     let lastErr;
-    for (const path of attempts) {
-      try {
-        const params = path.includes('gpt-image')
-          ? { action: 'generate', prompt, model: 'flux-1.1', width: 512, height: 512 }
-          : { action: 'توليد', prompt, model: '1' };
-        const d = await get(path, params, 120000);
-        return d.response?.url ?? null;
-      } catch (err) {
-        lastErr = err;
-      }
+    // 1. الأساسي: Flux عبر /api/v1/ai/imageai
+    try {
+      const d = await get(
+        '/api/v1/ai/imageai',
+        { action: 'توليد', prompt, model: String(model) },
+        60000,
+      );
+      if (d.response?.url) return d.response.url;
+    } catch (err) {
+      lastErr = err;
     }
+
+    // 2. الاحتياطي: MagicStudio عبر /api/v1/ai/image-generator
+    try {
+      const d = await get(
+        '/api/v1/ai/image-generator',
+        { action: 'generate', prompt, model: '4' },
+        60000,
+      );
+      if (d.response?.url) return d.response.url;
+    } catch (err) {
+      lastErr = err;
+    }
+
     throw lastErr ?? new Error('فشل توليد الصورة');
   },
 
-  async video(prompt) {
+  async chatgpt(prompt) {
+    try {
+      const d = await get('/api/v1/ai/chatgpt', { prompt }, 60000);
+      return d.response?.result?.message ?? d.response?.reply ?? d.response?.raw ?? d.response ?? '';
+    } catch {
+      const d = await get('/api/v1/ai/gpt', { q: prompt }, 60000);
+      return d.response?.result?.message ?? d.response?.raw ?? '';
+    }
+  },
+
+  async copilot(q) {
+    try {
+      const d = await get('/api/v1/ai/copilot', { q }, 60000);
+      return d.response?.result?.message ?? d.response?.message ?? d.response?.raw ?? d.response ?? '';
+    } catch {
+      const d = await get('/api/v1/ai/', { q }, 60000);
+      return d.response?.result?.message ?? d.response?.message ?? d.response?.raw ?? d.response ?? '';
+    }
+  },
+
+  async video(prompt, { ratio = '16:9', duration = 5, fps = 8, motion = 50, aiSound = false } = {}) {
     const d = await get(
       '/api/v1/ai/video-gen',
-      { action: 'txt2video', prompt, duration: 5, fps: 8, motion: 50, ratio: '16:9', aiSound: false },
+      { action: 'txt2video', prompt, duration, fps, motion, ratio, aiSound },
       120000,
     );
     return d.response?.url ?? null;
@@ -253,7 +283,7 @@ export const api = {
 
   async animeTts(text, voice = 'غوكو') {
     const d = await get('/api/v1/tools/anime-tts', { action: 'تكلم', text, voice }, 60000);
-    return d.response?.url ?? null;
+    return d.response?.url ?? d.response?.audio ?? (typeof d.response === 'string' ? d.response : null);
   },
 
   // ━━━━━━━━━ 📥 التحميل والبحث ━━━━━━━━━
@@ -292,9 +322,17 @@ export const api = {
     return { translated: d.response?.translated ?? '', from: d.response?.fromName ?? from };
   },
 
-  async lyrics(query, artist, title) {
-    const d = await get('/api/v1/tools/lyrics', { action: 'search', query, artist, title });
-    return { title: d.response?.title, artist: d.response?.artist, lyrics: d.response?.lyrics };
+  async lyrics(query, artist = '', title = '') {
+    const params = { action: 'search', query };
+    if (artist) params.artist = artist;
+    if (title) params.title = title;
+    const d = await get('/api/v1/tools/lyrics', params);
+    const resp = d.response ?? d.data ?? d;
+    return {
+      title: resp?.title ?? query ?? '',
+      artist: resp?.artist ?? '',
+      lyrics: resp?.lyrics ?? '',
+    };
   },
 
   async gifSearch(q, limit = 5) {
@@ -366,19 +404,73 @@ export const api = {
   // 🎵 سبوتيفاي — بحث رسمي بالأغاني والتراكات
   async spotifySearch(q, limit = 10) {
     const d = await get('/api/v1/search/spotify', { q, limit });
-    return d.response?.results ?? [];
+    const items = d.response?.results ?? d.results ?? d.response ?? [];
+    return (Array.isArray(items) ? items : [])
+      .filter((r) => r && (r.url || r.name || r.title))
+      .map((r, i) => ({
+        index: r.index ?? i,
+        name: String(r.name ?? r.title ?? 'بدون عنوان').trim(),
+        title: String(r.name ?? r.title ?? 'بدون عنوان').trim(),
+        artist: String(r.artist ?? r.artists ?? 'غير معروف').trim(),
+        album: String(r.album ?? '').trim(),
+        duration: String(r.duration ?? '').trim(),
+        cover: r.cover ?? r.thumbnail ?? r.image ?? null,
+        url: r.url ?? '',
+      }));
   },
 
   // 📱 تيك توك — بحث بالمحتوى والفيديوهات
   async tiktokSearch(query) {
     const d = await get('/api/v1/search/tiktok', { query });
-    return d.response?.results ?? d.results ?? [];
+    const items = d.response?.results ?? d.results ?? d.response ?? [];
+    return (Array.isArray(items) ? items : [])
+      .filter((r) => r && typeof r === 'object')
+      .map((r, i) => ({
+        index: r.index ?? i,
+        id: r.id ?? String(i),
+        desc: String(r.desc ?? r.title ?? '').trim(),
+        title: String(r.desc ?? r.title ?? 'فيديو تيك توك').trim(),
+        hashtags: Array.isArray(r.hashtags) ? r.hashtags : [],
+        author: {
+          name: String(r.author?.name ?? r.author?.username ?? 'مجهول'),
+          username: String(r.author?.username ?? ''),
+          avatar: r.author?.avatar ?? null,
+        },
+        stats: {
+          plays: String(r.stats?.plays ?? '0'),
+          likes: String(r.stats?.likes ?? '0'),
+          comments: String(r.stats?.comments ?? '0'),
+          shares: String(r.stats?.shares ?? '0'),
+        },
+        video: {
+          download_url: r.video?.download_url ?? r.video?.url ?? r.url ?? '',
+          download_url_hd: r.video?.download_url_hd ?? '',
+          thumbnail: r.video?.thumbnail ?? r.thumbnail ?? null,
+          duration: String(r.video?.duration ?? ''),
+        },
+        music: {
+          title: String(r.music?.title ?? ''),
+          author: String(r.music?.author ?? ''),
+          download_url: r.music?.download_url ?? null,
+        },
+        url: r.url ?? r.video?.download_url ?? '',
+      }));
   },
 
   // 📌 بينترست — بحث صور
   async pinimg(q, limit = 6) {
     const d = await get('/api/v1/search/pinimg', { q, limit });
-    return (d.results ?? []).filter((r) => r?.image || r?.url);
+    const items = d.response?.results ?? d.results ?? d.response ?? [];
+    return (Array.isArray(items) ? items : [])
+      .filter((r) => r && (r.image || r.url))
+      .map((r, i) => ({
+        index: r.index ?? i,
+        id: r.id ?? String(i),
+        title: String(r.title ?? r.description ?? 'صورة بينترست').trim() || 'صورة بينترست',
+        description: String(r.description ?? '').trim(),
+        image: r.image ?? r.url ?? null,
+        url: r.url ?? r.image ?? null,
+      }));
   },
 
   // 📦 ميديا فاير — فك وتحميل الروابط
